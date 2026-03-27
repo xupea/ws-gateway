@@ -6,8 +6,17 @@ import { useWsDebug, ConnectionStatus } from '../hooks/useWsDebug';
 const STATUS_STYLE: Record<ConnectionStatus, string> = {
   disconnected: 'bg-gray-400',
   connecting:   'bg-yellow-400 animate-pulse',
-  connected:    'bg-green-400',
+  connected:    'bg-yellow-400 animate-pulse',
+  initialized:  'bg-green-400',
   error:        'bg-red-500',
+};
+
+const STATUS_LABEL: Record<ConnectionStatus, string> = {
+  disconnected: 'Disconnected',
+  connecting:   'Connecting...',
+  connected:    'Connected (waiting ack)',
+  initialized:  'Initialized',
+  error:        'Error',
 };
 
 const LOG_STYLE = {
@@ -16,37 +25,44 @@ const LOG_STYLE = {
   system: 'text-gray-400 italic',
 };
 
-const DEFAULT_PRESETS = [
-  { label: 'Ping', value: JSON.stringify({ type: 'ping' }) },
-  {
-    label: 'Mock user msg',
-    value: JSON.stringify({ type: 'user', userId: 'user-1', event: 'balance_update', data: { balance: 100 } }),
-  },
-  {
-    label: 'Mock broadcast',
-    value: JSON.stringify({ type: 'broadcast', event: 'announcement', data: { text: 'Hello everyone!' } }),
-  },
-];
-
 export default function WsDebugger() {
-  const { status, logs, connect, disconnect, sendMessage, clearLogs } = useWsDebug();
+  const {
+    status, logs, subscriptions,
+    connect, disconnect,
+    sendMessage, subscribe, unsubscribe, ping,
+    clearLogs,
+  } = useWsDebug();
 
-  const [wsUrl, setWsUrl]   = useState('ws://localhost:3001/ws');
-  const [userId, setUserId] = useState('user-1');
-  const [input, setInput]   = useState(DEFAULT_PRESETS[0].value);
+  // 连接参数
+  const [wsUrl, setWsUrl]             = useState('ws://localhost:3001/ws');
+  const [accessToken, setAccessToken] = useState('b3f8cf666a18af715a6d2cc4e25a3220c5de420a761be2e23b2d3de0f071bbed1630c255b8bbabcfc4d8fdd396ce5ee5');
+  const [language, setLanguage]       = useState('en');
+  const [lockdownToken, setLockdown]  = useState('s5MNWtjTM5TvCMkAzxov');
+
+  // 订阅
+  const [topic, setTopic] = useState('AvailableBalances');
+
+  // 手动发消息
+  const [input, setInput] = useState('');
 
   const logEndRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
+  const isConnected = status === 'connected' || status === 'initialized';
+
   const handleConnect = () => {
-    if (status === 'connected') {
+    if (isConnected) {
       disconnect();
     } else {
-      connect(wsUrl, userId);
+      connect({ wsUrl, accessToken, language, lockdownToken });
     }
+  };
+
+  const handleSubscribe = () => {
+    if (!topic.trim()) return;
+    subscribe(topic.trim());
   };
 
   const handleSend = () => {
@@ -58,102 +74,150 @@ export default function WsDebugger() {
     <div className="min-h-screen bg-gray-950 text-gray-100 p-6 font-mono text-sm">
       <h1 className="text-xl font-bold mb-6 text-white">WS Gateway Debugger</h1>
 
-      {/* 连接配置 */}
-      <div className="grid grid-cols-1 gap-3 mb-4 md:grid-cols-[1fr_200px_160px]">
-        <input
-          className="bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400"
-          value={wsUrl}
-          onChange={(e) => setWsUrl(e.target.value)}
-          placeholder="ws://localhost:3001/ws"
-        />
-        <input
-          className="bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400"
-          value={userId}
-          onChange={(e) => setUserId(e.target.value)}
-          placeholder="userId (作为 session)"
-        />
-        <button
-          onClick={handleConnect}
-          className={`rounded px-4 py-2 font-semibold transition-colors ${
-            status === 'connected'
-              ? 'bg-red-600 hover:bg-red-700'
-              : 'bg-blue-600 hover:bg-blue-700'
-          }`}
-        >
-          {status === 'connected' ? 'Disconnect' : 'Connect'}
-        </button>
-      </div>
+      {/* ── 连接参数 ── */}
+      <section className="mb-4 space-y-2">
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_120px]">
+          <input
+            className="bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400"
+            value={wsUrl}
+            onChange={(e) => setWsUrl(e.target.value)}
+            placeholder="ws://localhost:3001/ws"
+          />
+          <button
+            onClick={handleConnect}
+            className={`rounded px-4 py-2 font-semibold transition-colors ${
+              isConnected ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
+            }`}
+          >
+            {isConnected ? 'Disconnect' : 'Connect'}
+          </button>
+        </div>
 
-      {/* 状态栏 */}
+        <input
+          className="w-full bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400"
+          value={accessToken}
+          onChange={(e) => setAccessToken(e.target.value)}
+          placeholder="accessToken"
+        />
+
+        <div className="grid grid-cols-2 gap-2">
+          <input
+            className="bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400"
+            value={language}
+            onChange={(e) => setLanguage(e.target.value)}
+            placeholder="language (en)"
+          />
+          <input
+            className="bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400"
+            value={lockdownToken}
+            onChange={(e) => setLockdown(e.target.value)}
+            placeholder="lockdownToken"
+          />
+        </div>
+      </section>
+
+      {/* ── 状态栏 ── */}
       <div className="flex items-center gap-2 mb-4 text-xs">
         <span className={`inline-block w-2 h-2 rounded-full ${STATUS_STYLE[status]}`} />
-        <span className="text-gray-400 capitalize">{status}</span>
+        <span className="text-gray-400">{STATUS_LABEL[status]}</span>
       </div>
 
-      {/* 消息日志 */}
-      <div className="bg-gray-900 border border-gray-700 rounded h-96 overflow-y-auto p-4 mb-4">
-        {logs.length === 0 && (
-          <p className="text-gray-600">No messages yet...</p>
-        )}
+      {/* ── 日志 ── */}
+      <div className="bg-gray-900 border border-gray-700 rounded h-80 overflow-y-auto p-4 mb-4">
+        {logs.length === 0 && <p className="text-gray-600">No messages yet...</p>}
         {logs.map((log) => (
           <div key={log.id} className="mb-1 leading-relaxed">
             <span className="text-gray-600 mr-2">{log.time}</span>
             <span className={`mr-2 ${LOG_STYLE[log.direction]}`}>
               {log.direction === 'in' ? '▼' : log.direction === 'out' ? '▲' : '·'}
             </span>
-            <span className={LOG_STYLE[log.direction]}>
-              <pre className="inline whitespace-pre-wrap break-all">{log.content}</pre>
-            </span>
+            <pre className={`inline whitespace-pre-wrap break-all ${LOG_STYLE[log.direction]}`}>
+              {log.content}
+            </pre>
           </div>
         ))}
         <div ref={logEndRef} />
       </div>
 
-      {/* 发消息 */}
-      <div className="flex gap-2 mb-3">
-        <textarea
-          className="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400 resize-none h-20"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="JSON payload..."
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSend();
-          }}
-        />
-        <div className="flex flex-col gap-2">
+      {/* ── 快捷操作 ── */}
+      <div className="flex gap-2 mb-4 flex-wrap">
+        <button
+          onClick={ping}
+          disabled={!isConnected}
+          className="bg-purple-700 hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed rounded px-4 py-2 font-semibold"
+        >
+          Ping
+        </button>
+        <button
+          onClick={clearLogs}
+          className="bg-gray-700 hover:bg-gray-600 rounded px-4 py-2"
+        >
+          Clear logs
+        </button>
+      </div>
+
+      {/* ── 订阅 ── */}
+      <section className="mb-4">
+        <p className="text-gray-500 text-xs mb-2 uppercase tracking-wide">Subscribe</p>
+        <div className="flex gap-2 mb-3">
+          <input
+            className="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400"
+            value={topic}
+            onChange={(e) => setTopic(e.target.value)}
+            placeholder="topic, e.g. AvailableBalances"
+          />
+          <button
+            onClick={handleSubscribe}
+            disabled={status !== 'initialized'}
+            className="bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed rounded px-4 py-2 font-semibold"
+          >
+            Subscribe
+          </button>
+        </div>
+
+        {/* 活跃订阅列表 */}
+        {subscriptions.length > 0 && (
+          <div className="space-y-1">
+            {subscriptions.map((s) => (
+              <div key={s.id} className="flex items-center justify-between bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs">
+                <div>
+                  <span className="text-green-400 font-semibold">{s.topic}</span>
+                  <span className="text-gray-500 ml-3">{s.id}</span>
+                </div>
+                <button
+                  onClick={() => unsubscribe(s.id)}
+                  className="text-red-400 hover:text-red-300 ml-4"
+                >
+                  Unsubscribe
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* ── 手动发消息 ── */}
+      <section>
+        <p className="text-gray-500 text-xs mb-2 uppercase tracking-wide">Manual message</p>
+        <div className="flex gap-2">
+          <textarea
+            className="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400 resize-none h-20"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder='{"type":"..."}  (Cmd/Ctrl+Enter to send)'
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) handleSend();
+            }}
+          />
           <button
             onClick={handleSend}
-            disabled={status !== 'connected'}
-            className="bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed rounded px-4 py-2 font-semibold"
+            disabled={!isConnected}
+            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded px-4 py-2 font-semibold"
           >
             Send
           </button>
-          <button
-            onClick={clearLogs}
-            className="bg-gray-700 hover:bg-gray-600 rounded px-4 py-2"
-          >
-            Clear
-          </button>
         </div>
-      </div>
-
-      {/* 预设快捷消息 */}
-      <div className="flex gap-2 flex-wrap">
-        {DEFAULT_PRESETS.map((p) => (
-          <button
-            key={p.label}
-            onClick={() => setInput(p.value)}
-            className="bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded px-3 py-1 text-xs"
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-
-      <p className="mt-6 text-xs text-gray-600">
-        Tip: userId 会作为 session cookie 的值。Gateway 开启 DEV_AUTH_BYPASS=true 时直接用该值作为 userId。
-        发送快捷消息需要 Gateway 直接消费（通过 RabbitMQ），这里只测试 WebSocket 连接和收消息。
-      </p>
+      </section>
     </div>
   );
 }
