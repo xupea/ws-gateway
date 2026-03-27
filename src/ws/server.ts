@@ -80,7 +80,7 @@ export function createServer(): uWS.TemplatedApp {
 
       switch (msg.type) {
         case 'ping': {
-          ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+          ws.send(JSON.stringify({ type: 'pong' }));
           break;
         }
 
