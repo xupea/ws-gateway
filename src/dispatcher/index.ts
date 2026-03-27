@@ -1,6 +1,7 @@
 import * as redis from '../redis';
 import * as connectionManager from '../connection/manager';
-import type { PushMessage, UserMessage, BroadcastMessage } from '../types';
+import * as subscriptionManager from '../subscription/manager';
+import type { PushMessage, UserMessage, BroadcastMessage, TopicPushMessage } from '../types';
 
 export async function dispatch(message: PushMessage): Promise<void> {
   if (message.type === 'broadcast') {
@@ -8,6 +9,9 @@ export async function dispatch(message: PushMessage): Promise<void> {
   }
   if (message.type === 'user') {
     return dispatchToUser(message);
+  }
+  if (message.type === 'topic') {
+    return dispatchToTopic(message);
   }
   console.warn('[Dispatcher] unknown message type:', (message as PushMessage).type);
 }
@@ -39,6 +43,14 @@ function dispatchBroadcast(message: BroadcastMessage): void {
 }
 
 /**
+ * 推送给本节点上订阅了指定 topic 的所有连接
+ * 每条 next 消息的 id 为该连接当初 subscribe 时客户端传入的 UUID
+ */
+function dispatchToTopic(message: TopicPushMessage): void {
+  subscriptionManager.publish(message.topic, message.data);
+}
+
+/**
  * 处理从 Redis Pub/Sub 路由过来的消息（其他节点转发来的）
  */
 export function handleRouted(message: PushMessage): void {
@@ -48,5 +60,9 @@ export function handleRouted(message: PushMessage): void {
   }
   if (message.type === 'user') {
     connectionManager.sendToUser(message.userId, message);
+    return;
+  }
+  if (message.type === 'topic') {
+    subscriptionManager.publish(message.topic, message.data);
   }
 }

@@ -1,9 +1,10 @@
 import uWS from 'uWebSockets.js';
 import { authenticateByToken } from '../auth';
 import * as connectionManager from '../connection/manager';
+import * as subscriptionManager from '../subscription/manager';
 import * as redis from '../redis';
 import config from '../config';
-import type { WsUserData, ConnectionInitMessage } from '../types';
+import type { WsUserData, ConnectionInitMessage, SubscribeMessage, CompleteMessage } from '../types';
 
 export function createServer(): uWS.TemplatedApp {
   const app = uWS.App();
@@ -19,13 +20,13 @@ export function createServer(): uWS.TemplatedApp {
 
       // 不在握手阶段做认证，等待客户端发送 connection_init
       res.upgrade<WsUserData>(
-        { userId: '', user: null, initialized: false },
+        { userId: '', user: null, initialized: false, subscriptions: new Map() },
         secKey, secProtocol, secExtension,
         context,
       );
     },
 
-    open: (ws) => {
+    open: (_ws) => {
       console.log('[WS] new connection established, waiting for connection_init');
     },
 
@@ -42,7 +43,7 @@ export function createServer(): uWS.TemplatedApp {
 
       const msg = parsed as Record<string, unknown>;
 
-      // 未初始化时只接受 connection_init
+      // ── 1. 未初始化：只接受 connection_init ──────────────────────────────
       if (!data.initialized) {
         if (msg.type !== 'connection_init') {
           ws.end(4400, 'connection_init required');
@@ -63,7 +64,6 @@ export function createServer(): uWS.TemplatedApp {
           return;
         }
 
-        // 将认证信息写入连接数据
         data.userId = user.userId;
         data.user = user;
         data.initialized = true;
@@ -76,18 +76,51 @@ export function createServer(): uWS.TemplatedApp {
         return;
       }
 
-      // 已初始化，处理正常消息
-      if (msg.type === 'ping') {
-        ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+      // ── 2. 已初始化：处理各类消息 ─────────────────────────────────────────
+
+      switch (msg.type) {
+        case 'ping': {
+          ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+          break;
+        }
+
+        case 'subscribe': {
+          const { id, payload: topic } = parsed as unknown as SubscribeMessage;
+          if (!id || typeof topic !== 'string') {
+            console.warn('[WS] invalid subscribe message, ignored');
+            return;
+          }
+          subscriptionManager.subscribe(topic, id, ws);
+          break;
+        }
+
+        case 'complete': {
+          const { id } = parsed as unknown as CompleteMessage;
+          if (!id) return;
+          const topic = data.subscriptions.get(id);
+          if (topic) {
+            subscriptionManager.unsubscribe(topic, id);
+            data.subscriptions.delete(id);
+          }
+          break;
+        }
+
+        default:
+          console.warn('[WS] unknown message type:', msg.type);
       }
     },
 
     close: async (ws, code) => {
       const { userId, initialized } = ws.getUserData();
+
       if (!initialized) {
         console.log(`[WS] uninitialized connection closed (${code})`);
         return;
       }
+
+      // 清理该连接的所有订阅
+      subscriptionManager.unsubscribeAll(ws);
+
       connectionManager.remove(userId, ws);
       if (!connectionManager.hasUser(userId)) {
         await redis.removeUserNode(userId);
@@ -102,6 +135,7 @@ export function createServer(): uWS.TemplatedApp {
       status: 'ok',
       nodeId: config.server.nodeId,
       connections: connectionManager.size(),
+      subscriptions: subscriptionManager.size(),
     }));
   });
 
