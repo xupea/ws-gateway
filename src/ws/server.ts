@@ -33,21 +33,23 @@ export function createServer(): uWS.TemplatedApp {
       const data = ws.getUserData();
       const text = Buffer.from(message).toString();
 
-      let parsed: Record<string, unknown>;
+      let parsed: unknown;
       try {
         parsed = JSON.parse(text);
       } catch {
         return; // ignore malformed messages
       }
 
+      const msg = parsed as Record<string, unknown>;
+
       // 未初始化时只接受 connection_init
       if (!data.initialized) {
-        if (parsed.type !== 'connection_init') {
+        if (msg.type !== 'connection_init') {
           ws.end(4400, 'connection_init required');
           return;
         }
 
-        const { payload } = parsed as ConnectionInitMessage;
+        const { payload } = parsed as unknown as ConnectionInitMessage;
         const accessToken = payload?.accessToken;
 
         if (!accessToken) {
@@ -75,7 +77,7 @@ export function createServer(): uWS.TemplatedApp {
       }
 
       // 已初始化，处理正常消息
-      if (parsed.type === 'ping') {
+      if (msg.type === 'ping') {
         ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
       }
     },
