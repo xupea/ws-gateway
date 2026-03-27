@@ -7,7 +7,22 @@ export interface AuthUser {
 // WebSocket 连接上挂载的用户数据
 export interface WsUserData {
   userId: string;
-  user: AuthUser;
+  user: AuthUser | null;
+  initialized: boolean;
+}
+
+// connection_init 消息的 payload
+export interface ConnectionInitPayload {
+  accessToken: string;
+  language?: string;
+  lockdownToken?: string;
+  [key: string]: unknown;
+}
+
+// 客户端发送的 connection_init 消息
+export interface ConnectionInitMessage {
+  type: 'connection_init';
+  payload: ConnectionInitPayload;
 }
 
 // MQ 消息基础结构

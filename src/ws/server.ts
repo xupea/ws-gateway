@@ -1,9 +1,9 @@
 import uWS from 'uWebSockets.js';
-import { authenticate } from '../auth';
+import { authenticateByToken } from '../auth';
 import * as connectionManager from '../connection/manager';
 import * as redis from '../redis';
 import config from '../config';
-import type { WsUserData } from '../types';
+import type { WsUserData, ConnectionInitMessage } from '../types';
 
 export function createServer(): uWS.TemplatedApp {
   const app = uWS.App();
@@ -12,53 +12,80 @@ export function createServer(): uWS.TemplatedApp {
     maxPayloadLength: 16 * 1024,
     idleTimeout: 60,
 
-    upgrade: async (res, req, context) => {
-      // 异步处理前必须注册 onAborted，否则客户端提前断开会崩溃
-      let aborted = false;
-      res.onAborted(() => { aborted = true; });
-
-      const cookieHeader = req.getHeader('cookie');
+    upgrade: (res, req, context) => {
       const secKey = req.getHeader('sec-websocket-key');
       const secProtocol = req.getHeader('sec-websocket-protocol');
       const secExtension = req.getHeader('sec-websocket-extensions');
 
-      const user = await authenticate(cookieHeader);
-
-      if (aborted) return;
-
-      if (!user) {
-        res.writeStatus('401 Unauthorized').end('Unauthorized');
-        return;
-      }
-
+      // 不在握手阶段做认证，等待客户端发送 connection_init
       res.upgrade<WsUserData>(
-        { userId: user.userId, user },
+        { userId: '', user: null, initialized: false },
         secKey, secProtocol, secExtension,
         context,
       );
     },
 
-    open: async (ws) => {
-      const { userId } = ws.getUserData();
-      connectionManager.add(userId, ws);
-      await redis.setUserNode(userId);
-      console.log(`[WS] user ${userId} connected, total: ${connectionManager.size()}`);
+    open: (ws) => {
+      console.log('[WS] new connection established, waiting for connection_init');
     },
 
-    message: (ws, message) => {
+    message: async (ws, message) => {
+      const data = ws.getUserData();
       const text = Buffer.from(message).toString();
+
+      let parsed: Record<string, unknown>;
       try {
-        const data = JSON.parse(text);
-        if (data.type === 'ping') {
-          ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
-        }
+        parsed = JSON.parse(text);
       } catch {
-        // ignore malformed messages
+        return; // ignore malformed messages
+      }
+
+      // 未初始化时只接受 connection_init
+      if (!data.initialized) {
+        if (parsed.type !== 'connection_init') {
+          ws.end(4400, 'connection_init required');
+          return;
+        }
+
+        const { payload } = parsed as ConnectionInitMessage;
+        const accessToken = payload?.accessToken;
+
+        if (!accessToken) {
+          ws.end(4400, 'missing accessToken');
+          return;
+        }
+
+        const user = await authenticateByToken(accessToken);
+        if (!user) {
+          ws.end(4401, 'Unauthorized');
+          return;
+        }
+
+        // 将认证信息写入连接数据
+        data.userId = user.userId;
+        data.user = user;
+        data.initialized = true;
+
+        connectionManager.add(user.userId, ws);
+        await redis.setUserNode(user.userId);
+
+        ws.send(JSON.stringify({ type: 'connection_ack' }));
+        console.log(`[WS] user ${user.userId} initialized, total: ${connectionManager.size()}`);
+        return;
+      }
+
+      // 已初始化，处理正常消息
+      if (parsed.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
       }
     },
 
     close: async (ws, code) => {
-      const { userId } = ws.getUserData();
+      const { userId, initialized } = ws.getUserData();
+      if (!initialized) {
+        console.log(`[WS] uninitialized connection closed (${code})`);
+        return;
+      }
       connectionManager.remove(userId, ws);
       if (!connectionManager.hasUser(userId)) {
         await redis.removeUserNode(userId);

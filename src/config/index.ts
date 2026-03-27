@@ -9,9 +9,10 @@ const config = {
 
   auth: {
     validateUrl: process.env.AUTH_VALIDATE_URL ?? 'http://localhost:8080/internal/session/validate',
+    tokenValidateUrl: process.env.AUTH_TOKEN_VALIDATE_URL ?? 'http://localhost:8080/internal/token/validate',
     sessionCookieName: process.env.SESSION_COOKIE_NAME ?? 'session',
     timeoutMs: parseInt(process.env.AUTH_TIMEOUT_MS ?? '3000'),
-    // DEV_AUTH_BYPASS=true 时跳过认证，直接用 session 值作为 userId，仅用于本地调试
+    // DEV_AUTH_BYPASS=true 时跳过认证，直接用 accessToken 作为 userId，仅用于本地调试
     devBypass: process.env.DEV_AUTH_BYPASS === 'true',
   },
 
