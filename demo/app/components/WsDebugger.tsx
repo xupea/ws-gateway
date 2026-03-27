@@ -40,7 +40,18 @@ export default function WsDebugger() {
   const [lockdownToken, setLockdown]  = useState('s5MNWtjTM5TvCMkAzxov');
 
   // 订阅
-  const [topic, setTopic] = useState('AvailableBalances');
+  const TOPICS = [
+    'AvailableBalances',
+    'VaultBalances',
+    'HighrollerHouseBets',
+    'Announcements',
+    'RaceStatus',
+    'FeatureFlag',
+    'Notifications',
+    'HouseBets',
+    'depositBonusTransaction',
+  ];
+  const [topic, setTopic] = useState(TOPICS[0]);
 
   // 手动发消息
   const [input, setInput] = useState('');
@@ -160,12 +171,15 @@ export default function WsDebugger() {
       <section className="mb-4">
         <p className="text-gray-500 text-xs mb-2 uppercase tracking-wide">Subscribe</p>
         <div className="flex gap-2 mb-3">
-          <input
+          <select
             className="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-blue-400"
             value={topic}
             onChange={(e) => setTopic(e.target.value)}
-            placeholder="topic, e.g. AvailableBalances"
-          />
+          >
+            {TOPICS.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
           <button
             onClick={handleSubscribe}
             disabled={status !== 'initialized'}
