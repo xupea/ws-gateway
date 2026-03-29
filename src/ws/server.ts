@@ -91,7 +91,17 @@ export function createServer(): uWS.TemplatedApp {
             console.warn('[WS] invalid subscribe message, ignored');
             return;
           }
-          subscriptionManager.subscribe(topic, id, ws);
+
+          // 验证 topic 是否支持
+          const success = subscriptionManager.subscribe(topic, id, ws);
+          if (!success) {
+            // 返回错误响应
+            ws.send(JSON.stringify({
+              id,
+              type: 'error',
+              payload: { message: `unsupported topic: ${topic}` }
+            }));
+          }
           break;
         }
 

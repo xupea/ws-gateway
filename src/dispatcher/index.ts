@@ -47,7 +47,15 @@ function dispatchBroadcast(message: BroadcastMessage): void {
  * 每条 next 消息的 id 为该连接当初 subscribe 时客户端传入的 UUID
  */
 function dispatchToTopic(message: TopicPushMessage): void {
-  subscriptionManager.publish(message.topic, message.data);
+  const { topic, data } = message;
+  
+  // 验证 topic 是否支持
+  if (!subscriptionManager.isSupportedTopic(topic)) {
+    console.warn(`[Dispatcher] unsupported topic: ${topic}, message dropped`);
+    return;
+  }
+  
+  subscriptionManager.publish(topic, data);
 }
 
 /**
@@ -63,6 +71,11 @@ export function handleRouted(message: PushMessage): void {
     return;
   }
   if (message.type === 'topic') {
+    // 验证 topic 是否支持
+    if (!subscriptionManager.isSupportedTopic(message.topic)) {
+      console.warn(`[Dispatcher] routed unsupported topic: ${message.topic}, message dropped`);
+      return;
+    }
     subscriptionManager.publish(message.topic, message.data);
   }
 }

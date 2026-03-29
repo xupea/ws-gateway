@@ -10,6 +10,7 @@
  */
 import type { WebSocket } from 'uWebSockets.js';
 import type { WsUserData, NextMessage } from '../types';
+import { SUPPORTED_TOPICS } from '../types';
 
 type WS = WebSocket<WsUserData>;
 
@@ -17,9 +18,22 @@ type WS = WebSocket<WsUserData>;
 const topicRegistry = new Map<string, Map<string, WS>>();
 
 /**
+ * 验证 topic 是否在支持列表中
+ */
+export function isSupportedTopic(topic: string): boolean {
+  return SUPPORTED_TOPICS.includes(topic as any);
+}
+
+/**
  * 注册一个订阅
  */
-export function subscribe(topic: string, subscriptionId: string, ws: WS): void {
+export function subscribe(topic: string, subscriptionId: string, ws: WS): boolean {
+  // 验证 topic 是否支持
+  if (!isSupportedTopic(topic)) {
+    console.warn(`[Subscription] unsupported topic: ${topic}`);
+    return false;
+  }
+
   if (!topicRegistry.has(topic)) {
     topicRegistry.set(topic, new Map());
   }
@@ -27,6 +41,7 @@ export function subscribe(topic: string, subscriptionId: string, ws: WS): void {
   // 同步写入连接自身的订阅表（便于断开时批量清理）
   ws.getUserData().subscriptions.set(subscriptionId, topic);
   console.log(`[Subscription] +subscribe topic="${topic}" id=${subscriptionId}`);
+  return true;
 }
 
 /**

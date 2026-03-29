@@ -10,7 +10,15 @@ export class RabbitMQConsumer extends MQConsumer {
     this.connection = await amqplib.connect(config.rabbitmq.url);
     this.channel = await this.connection.createChannel();
 
+    // 声明 topic exchange
+    await this.channel.assertExchange('stake.topic', 'topic', { durable: true });
+
+    // 声明队列
     await this.channel.assertQueue(config.rabbitmq.queue, { durable: true });
+
+    // 绑定队列到 exchange，pattern: push.#
+    await this.channel.bindQueue(config.rabbitmq.queue, 'stake.topic', 'push.#');
+
     this.channel.prefetch(config.rabbitmq.prefetch);
 
     this.connection.on('error', (err: Error) => {
@@ -21,7 +29,7 @@ export class RabbitMQConsumer extends MQConsumer {
       setTimeout(() => this.connect(), 5000);
     });
 
-    console.log(`[RabbitMQ] connected, queue: ${config.rabbitmq.queue}`);
+    console.log(`[RabbitMQ] connected, exchange: stake.topic, queue: ${config.rabbitmq.queue}, pattern: push.#`);
   }
 
   async subscribe(handler: MessageHandler): Promise<void> {
