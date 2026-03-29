@@ -52,13 +52,14 @@ export function createServer(): uWS.TemplatedApp {
 
         const { payload } = parsed as unknown as ConnectionInitMessage;
         const accessToken = payload?.accessToken;
+        const lockdownToken = payload?.lockdownToken;
 
-        if (!accessToken) {
-          ws.end(4400, 'missing accessToken');
+        if (!accessToken && !lockdownToken) {
+          ws.end(4400, 'missing accessToken or lockdownToken');
           return;
         }
 
-        const user = await authenticateByToken(accessToken);
+        const user = await authenticateByToken(accessToken, lockdownToken);
         if (!user) {
           ws.end(4401, 'Unauthorized');
           return;

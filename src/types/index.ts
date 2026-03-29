@@ -15,9 +15,9 @@ export interface WsUserData {
 
 // connection_init 消息的 payload
 export interface ConnectionInitPayload {
-  accessToken: string;
+  accessToken?: string;        // 已登录用户
+  lockdownToken?: string;      // 未登录用户/游客
   language?: string;
-  lockdownToken?: string;
   [key: string]: unknown;
 }
 
