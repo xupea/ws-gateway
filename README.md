@@ -76,10 +76,11 @@ cp .env.example .env
 |------|--------|------|
 | `PORT` | `3000` | 监听端口 |
 | `NODE_ID` | `node-{pid}` | 节点唯一标识，多节点部署时必须各不相同 |
-| `AUTH_VALIDATE_URL` | `http://localhost:8080/internal/session/validate` | Java 认证接口地址 |
+| `AUTH_VALIDATE_URL` | `http://localhost:8080/internal/session/validate` | Java 认证接口地址（保留备用，Cookie 方式） |
+| `AUTH_TOKEN_VALIDATE_URL` | `http://localhost:8080/internal/token/validate` | **推荐** Java 认证接口地址（WebSocket connection_init 方式） |
 | `SESSION_COOKIE_NAME` | `session` | session cookie 名称 |
 | `AUTH_TIMEOUT_MS` | `3000` | 认证请求超时（ms） |
-| `DEV_AUTH_BYPASS` | `false` | **仅开发用**，跳过认证，直接用 cookie 值作为 userId |
+| `DEV_AUTH_BYPASS` | `false` | **仅开发用**，跳过认证，直接用 token 值作为 userId |
 | `REDIS_HOST` | `127.0.0.1` | Redis 地址 |
 | `REDIS_PORT` | `6379` | Redis 端口 |
 | `REDIS_PASSWORD` | — | Redis 密码（可选） |
@@ -130,7 +131,7 @@ npm install
 npm run dev   # 监听 :3001
 ```
 
-打开 `http://localhost:3001`，填入任意 userId，点击 Connect 即可连接。
+打开 `http://localhost:3001`，勾选 "Logged In" 选项或保持未勾选状态（游客），填入对应的 accessToken 或 lockdownToken，点击 Connect 即可连接。
 
 ### 测试推送消息
 
@@ -177,9 +178,35 @@ docker compose up -d --scale ws-gateway=3
 
 ## Java 对接说明
 
-### 认证接口
+### 认证接口（推荐方式）
 
-Gateway 在 WebSocket 握手时会调用此接口验证 session：
+Gateway 在 WebSocket 连接建立后，等待客户端发送 `connection_init` 消息，其中包含 `accessToken`（已登录用户）或 `lockdownToken`（游客用户）。
+
+Gateway 会调用此接口验证 token：
+
+```
+POST {AUTH_TOKEN_VALIDATE_URL}
+Content-Type: application/json
+
+{ "accessToken": "<token>" }
+```
+
+或
+
+```
+{ "lockdownToken": "<token>" }
+```
+
+**成功响应（200）：**
+```json
+{ "userId": "123", "username": "alice" }
+```
+
+**失败响应：** HTTP 401
+
+### 认证接口（保留备用 - Cookie 方式）
+
+Gateway 在 WebSocket 握手时会调用此接口验证 session（需要客户端在 Cookie 中发送）：
 
 ```
 POST {AUTH_VALIDATE_URL}
@@ -220,22 +247,103 @@ Java 向 `ws.push` 队列发送 JSON 消息：
 
 ### WebSocket 协议
 
-**客户端心跳：**
+#### 1. 连接初始化（必须）
+
+客户端连接后立即发送 `connection_init` 消息进行身份验证：
+
+```json
+{
+  "type": "connection_init",
+  "payload": {
+    "accessToken": "...",
+    "language": "en"
+  }
+}
+```
+
+或（游客用户）：
+
+```json
+{
+  "type": "connection_init",
+  "payload": {
+    "lockdownToken": "...",
+    "language": "en"
+  }
+}
+```
+
+服务端验证成功后返回：
+
+```json
+{ "type": "connection_ack" }
+```
+
+只有收到 `connection_ack` 后，才能发送其他消息。
+
+#### 2. 订阅（可选）
+
+客户端发起订阅请求：
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "subscribe",
+  "payload": "AvailableBalances"
+}
+```
+
+服务端接收订阅（不返回确认），当有数据时会推送：
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "next",
+  "payload": {
+    "amount": 100,
+    "currency": "USD"
+  }
+}
+```
+
+#### 3. 取消订阅
+
+客户端发送 `complete` 消息停止订阅：
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "type": "complete"
+}
+```
+
+#### 4. 心跳
+
+客户端定期发送 ping，服务端响应 pong：
+
+**客户端：**
 ```json
 { "type": "ping" }
 ```
 
-**服务端响应：**
+**服务端：**
 ```json
-{ "type": "pong", "ts": 1700000000000 }
+{ "type": "pong" }
 ```
 
-**健康检查接口：**
+#### 5. 健康检查接口
+
 ```
 GET /health
 ```
+
 ```json
-{ "status": "ok", "nodeId": "node-1", "connections": 42 }
+{
+  "status": "ok",
+  "nodeId": "node-1",
+  "connections": 42,
+  "subscriptions": 128
+}
 ```
 
 ## 替换 MQ
