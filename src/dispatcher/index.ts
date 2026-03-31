@@ -1,6 +1,8 @@
 import * as redis from '../redis';
+import * as membership from '../cluster/membership';
 import * as connectionManager from '../connection/manager';
 import * as subscriptionManager from '../subscription/manager';
+import config from '../config';
 import type { PushMessage, UserMessage, BroadcastMessage, TopicPushMessage } from '../types';
 
 export async function dispatch(message: PushMessage): Promise<void> {
@@ -25,15 +27,36 @@ async function dispatchToUser(message: UserMessage): Promise<void> {
     return;
   }
 
-  // 查 Redis 找用户在哪个节点
-  const targetNodeId = await redis.getUserNode(userId);
-  if (!targetNodeId) {
+  // 第一步：通过一致性哈希环快速计算目标节点（纯内存，无 IO）
+  const hashTargetNodeId = membership.getTargetNode(userId);
+  if (!hashTargetNodeId) {
+    console.debug(`[Dispatcher] no live nodes, message dropped`);
+    return;
+  }
+
+  // 哈希环指向的节点不是本节点 → 直接转发，无需 Redis
+  if (hashTargetNodeId !== config.server.nodeId) {
+    await redis.routeToNode(hashTargetNodeId, message);
+    return;
+  }
+
+  // 第二步：哈希环指向本节点但用户不在（LB 未做一致性哈希时会出现此情况）
+  // Fallback：查 Redis 确认用户的真实节点，避免消息被误丢
+  const actualNodeId = await redis.getUserNode(userId);
+  if (!actualNodeId) {
     console.debug(`[Dispatcher] user ${userId} is offline, message dropped`);
     return;
   }
 
-  // 转发给目标节点
-  await redis.routeToNode(targetNodeId, message);
+  if (actualNodeId === config.server.nodeId) {
+    // Redis 也指向本节点，用户确实不在线
+    console.debug(`[Dispatcher] user ${userId} is offline (confirmed), message dropped`);
+    return;
+  }
+
+  // 转发到 Redis 中记录的真实节点
+  console.debug(`[Dispatcher] hash miss for user ${userId}, routing via Redis to ${actualNodeId}`);
+  await redis.routeToNode(actualNodeId, message);
 }
 
 function dispatchBroadcast(message: BroadcastMessage): void {

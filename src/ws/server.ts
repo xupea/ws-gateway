@@ -69,6 +69,7 @@ export function createServer(): uWS.TemplatedApp {
         data.initialized = true;
 
         connectionManager.add(user.userId, ws);
+        // 写入 Redis 供 dispatcher fallback 查询（LB 未做一致性哈希时使用）
         await redis.setUserNode(user.userId);
 
         ws.send(JSON.stringify({ type: 'connection_ack' }));
@@ -123,6 +124,7 @@ export function createServer(): uWS.TemplatedApp {
 
       connectionManager.remove(userId, ws);
       if (!connectionManager.hasUser(userId)) {
+        // 该用户的最后一个连接断开，清除 Redis 中的节点记录
         await redis.removeUserNode(userId);
       }
       console.log(`[WS] user ${userId} disconnected (${code}), total: ${connectionManager.size()}`);
