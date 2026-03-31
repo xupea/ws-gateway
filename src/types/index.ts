@@ -49,7 +49,7 @@ export interface NextMessage {
   payload: { data: unknown };
 }
 
-// ---------- MQ 消息基础结构 ----------
+// ---------- 网关入口消息基础结构 ----------
 export type MessageType = 'user' | 'broadcast' | 'topic';
 
 export interface BaseMessage {

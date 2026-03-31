@@ -36,20 +36,22 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+const uWebSockets_js_1 = __importDefault(require("uWebSockets.js"));
 const config_1 = __importDefault(require("./config"));
 const redis = __importStar(require("./redis"));
-const rabbitmq_1 = require("./mq/rabbitmq");
 const server_1 = require("./ws/server");
 const dispatcher_1 = require("./dispatcher");
 async function main() {
     await redis.connect();
+    await redis.subscribeToIngress(dispatcher_1.dispatch);
     await redis.subscribeToRoutes(dispatcher_1.handleRouted);
-    const mq = new rabbitmq_1.RabbitMQConsumer();
-    await mq.connect();
-    await mq.subscribe(dispatcher_1.dispatch);
-    const app = (0, server_1.createServer)();
+    const state = { isDraining: false };
+    const app = (0, server_1.createServer)(state);
+    let listenSocket = null;
+    let shuttingDown = false;
     app.listen(config_1.default.server.port, (token) => {
         if (token) {
+            listenSocket = token;
             console.log(`[Server] node ${config_1.default.server.nodeId} listening on port ${config_1.default.server.port}`);
         }
         else {
@@ -58,8 +60,17 @@ async function main() {
         }
     });
     async function shutdown() {
+        if (shuttingDown)
+            return;
+        shuttingDown = true;
+        state.isDraining = true;
         console.log('[Server] shutting down...');
-        await mq.close();
+        if (listenSocket) {
+            uWebSockets_js_1.default.us_listen_socket_close(listenSocket);
+            listenSocket = null;
+        }
+        await new Promise((resolve) => setTimeout(resolve, config_1.default.server.shutdownGraceMs));
+        await redis.close();
         process.exit(0);
     }
     process.on('SIGTERM', shutdown);

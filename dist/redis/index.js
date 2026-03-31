@@ -10,6 +10,10 @@ exports.removeUserNode = removeUserNode;
 exports.getUserNode = getUserNode;
 exports.routeToNode = routeToNode;
 exports.subscribeToRoutes = subscribeToRoutes;
+exports.subscribeToIngress = subscribeToIngress;
+exports.close = close;
+exports.isHealthy = isHealthy;
+exports.ping = ping;
 const ioredis_1 = __importDefault(require("ioredis"));
 const config_1 = __importDefault(require("../config"));
 const client = new ioredis_1.default({
@@ -21,7 +25,14 @@ const client = new ioredis_1.default({
 });
 exports.client = client;
 // Pub/Sub 订阅需要独立连接，订阅后该连接不能再执行普通命令
-const subscriber = new ioredis_1.default({
+const routeSubscriber = new ioredis_1.default({
+    host: config_1.default.redis.host,
+    port: config_1.default.redis.port,
+    password: config_1.default.redis.password,
+    db: config_1.default.redis.db,
+    lazyConnect: true,
+});
+const ingressSubscriber = new ioredis_1.default({
     host: config_1.default.redis.host,
     port: config_1.default.redis.port,
     password: config_1.default.redis.password,
@@ -29,10 +40,15 @@ const subscriber = new ioredis_1.default({
     lazyConnect: true,
 });
 client.on('error', (err) => console.error('[Redis] client error:', err.message));
-subscriber.on('error', (err) => console.error('[Redis] subscriber error:', err.message));
+routeSubscriber.on('error', (err) => console.error('[Redis] route subscriber error:', err.message));
+ingressSubscriber.on('error', (err) => console.error('[Redis] ingress subscriber error:', err.message));
+function isOpen(redis) {
+    return redis.status === 'ready' || redis.status === 'connect' || redis.status === 'connecting';
+}
 async function connect() {
     await client.connect();
-    await subscriber.connect();
+    await routeSubscriber.connect();
+    await ingressSubscriber.connect();
     console.log('[Redis] connected');
 }
 async function setUserNode(userId) {
@@ -49,8 +65,8 @@ async function routeToNode(nodeId, message) {
 }
 async function subscribeToRoutes(handler) {
     const channel = `${config_1.default.redis.routeChannelPrefix}${config_1.default.server.nodeId}`;
-    await subscriber.subscribe(channel);
-    subscriber.on('message', (ch, data) => {
+    await routeSubscriber.subscribe(channel);
+    routeSubscriber.on('message', (ch, data) => {
         if (ch !== channel)
             return;
         try {
@@ -61,4 +77,37 @@ async function subscribeToRoutes(handler) {
         }
     });
     console.log(`[Redis] subscribed to route channel: ${channel}`);
+}
+async function subscribeToIngress(handler) {
+    const channel = config_1.default.redis.ingressChannel;
+    await ingressSubscriber.subscribe(channel);
+    ingressSubscriber.on('message', async (ch, data) => {
+        if (ch !== channel)
+            return;
+        try {
+            await handler(JSON.parse(data));
+        }
+        catch (err) {
+            console.error('[Redis] ingress message handler error:', err.message);
+        }
+    });
+    console.log(`[Redis] subscribed to ingress channel: ${channel}`);
+}
+async function close() {
+    await Promise.allSettled([
+        client.quit(),
+        routeSubscriber.quit(),
+        ingressSubscriber.quit(),
+    ]);
+}
+function isHealthy() {
+    return isOpen(client) && isOpen(routeSubscriber) && isOpen(ingressSubscriber);
+}
+async function ping() {
+    try {
+        return (await client.ping()) === 'PONG';
+    }
+    catch {
+        return false;
+    }
 }

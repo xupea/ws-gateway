@@ -1,20 +1,22 @@
+import uWS from 'uWebSockets.js';
 import config from './config';
 import * as redis from './redis';
-import { RabbitMQConsumer } from './mq/rabbitmq';
 import { createServer } from './ws/server';
 import { dispatch, handleRouted } from './dispatcher';
 
 async function main(): Promise<void> {
   await redis.connect();
+  await redis.subscribeToIngress(dispatch);
   await redis.subscribeToRoutes(handleRouted);
 
-  const mq = new RabbitMQConsumer();
-  await mq.connect();
-  await mq.subscribe(dispatch);
+  const state = { isDraining: false };
+  const app = createServer(state);
+  let listenSocket: uWS.us_listen_socket | null = null;
+  let shuttingDown = false;
 
-  const app = createServer();
   app.listen(config.server.port, (token) => {
     if (token) {
+      listenSocket = token;
       console.log(`[Server] node ${config.server.nodeId} listening on port ${config.server.port}`);
     } else {
       console.error(`[Server] failed to listen on port ${config.server.port}`);
@@ -23,8 +25,16 @@ async function main(): Promise<void> {
   });
 
   async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    state.isDraining = true;
     console.log('[Server] shutting down...');
-    await mq.close();
+    if (listenSocket) {
+      uWS.us_listen_socket_close(listenSocket);
+      listenSocket = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, config.server.shutdownGraceMs));
+    await redis.close();
     process.exit(0);
   }
   process.on('SIGTERM', shutdown);

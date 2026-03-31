@@ -38,7 +38,7 @@ async function dispatchToUser(message: UserMessage): Promise<void> {
 
 function dispatchBroadcast(message: BroadcastMessage): void {
   // 广播：本节点推给所有连接
-  // 所有节点都消费同一条 MQ 广播消息，各自广播给自己的连接
+  // 所有节点都能收到同一条入口广播消息，各自广播给自己的连接
   connectionManager.broadcast(message);
 }
 

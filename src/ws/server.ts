@@ -6,14 +6,24 @@ import * as redis from '../redis';
 import config from '../config';
 import type { WsUserData, ConnectionInitMessage, SubscribeMessage, CompleteMessage } from '../types';
 
-export function createServer(): uWS.TemplatedApp {
+export interface ServerState {
+  isDraining: boolean;
+}
+
+export function createServer(state: ServerState): uWS.TemplatedApp {
   const app = uWS.App();
 
   app.ws<WsUserData>('/ws', {
     maxPayloadLength: 16 * 1024,
-    idleTimeout: 60,
+    idleTimeout: config.server.wsIdleTimeout,
 
     upgrade: (res, req, context) => {
+      if (state.isDraining) {
+        res.writeStatus('503 Service Unavailable');
+        res.end('server draining');
+        return;
+      }
+
       const secKey = req.getHeader('sec-websocket-key');
       const secProtocol = req.getHeader('sec-websocket-protocol');
       const secExtension = req.getHeader('sec-websocket-extensions');
@@ -141,12 +151,27 @@ export function createServer(): uWS.TemplatedApp {
   });
 
   app.get('/health', (res) => {
+    const healthy = !state.isDraining && redis.isHealthy();
+    res.writeStatus(healthy ? '200 OK' : '503 Service Unavailable');
     res.writeHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({
-      status: 'ok',
+      status: healthy ? 'ok' : 'degraded',
       nodeId: config.server.nodeId,
+      redis: healthy ? 'ok' : 'unavailable',
+      draining: state.isDraining,
       connections: connectionManager.size(),
       subscriptions: subscriptionManager.size(),
+    }));
+  });
+
+  app.get('/ready', async (res) => {
+    const healthy = !state.isDraining && await redis.ping();
+    res.writeStatus(healthy ? '200 OK' : '503 Service Unavailable');
+    res.writeHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      status: healthy ? 'ready' : 'not_ready',
+      nodeId: config.server.nodeId,
+      draining: state.isDraining,
     }));
   });
 

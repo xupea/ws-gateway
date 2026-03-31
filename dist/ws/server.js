@@ -40,50 +40,114 @@ exports.createServer = createServer;
 const uWebSockets_js_1 = __importDefault(require("uWebSockets.js"));
 const auth_1 = require("../auth");
 const connectionManager = __importStar(require("../connection/manager"));
+const subscriptionManager = __importStar(require("../subscription/manager"));
 const redis = __importStar(require("../redis"));
 const config_1 = __importDefault(require("../config"));
-function createServer() {
+function createServer(state) {
     const app = uWebSockets_js_1.default.App();
     app.ws('/ws', {
         maxPayloadLength: 16 * 1024,
-        idleTimeout: 60,
-        upgrade: async (res, req, context) => {
-            // 异步处理前必须注册 onAborted，否则客户端提前断开会崩溃
-            let aborted = false;
-            res.onAborted(() => { aborted = true; });
-            const cookieHeader = req.getHeader('cookie');
+        idleTimeout: config_1.default.server.wsIdleTimeout,
+        upgrade: (res, req, context) => {
+            if (state.isDraining) {
+                res.writeStatus('503 Service Unavailable');
+                res.end('server draining');
+                return;
+            }
             const secKey = req.getHeader('sec-websocket-key');
             const secProtocol = req.getHeader('sec-websocket-protocol');
             const secExtension = req.getHeader('sec-websocket-extensions');
-            const user = await (0, auth_1.authenticate)(cookieHeader);
-            if (aborted)
-                return;
-            if (!user) {
-                res.writeStatus('401 Unauthorized').end('Unauthorized');
-                return;
-            }
-            res.upgrade({ userId: user.userId, user }, secKey, secProtocol, secExtension, context);
+            // 不在握手阶段做认证，等待客户端发送 connection_init
+            res.upgrade({ userId: '', user: null, initialized: false, subscriptions: new Map() }, secKey, secProtocol, secExtension, context);
         },
-        open: async (ws) => {
-            const { userId } = ws.getUserData();
-            connectionManager.add(userId, ws);
-            await redis.setUserNode(userId);
-            console.log(`[WS] user ${userId} connected, total: ${connectionManager.size()}`);
+        open: (_ws) => {
+            console.log('[WS] new connection established, waiting for connection_init');
         },
-        message: (ws, message) => {
+        message: async (ws, message) => {
+            const data = ws.getUserData();
             const text = Buffer.from(message).toString();
+            let parsed;
             try {
-                const data = JSON.parse(text);
-                if (data.type === 'ping') {
-                    ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
-                }
+                parsed = JSON.parse(text);
             }
             catch {
-                // ignore malformed messages
+                return; // ignore malformed messages
+            }
+            const msg = parsed;
+            // ── 1. 未初始化：只接受 connection_init ──────────────────────────────
+            if (!data.initialized) {
+                if (msg.type !== 'connection_init') {
+                    ws.end(4400, 'connection_init required');
+                    return;
+                }
+                const { payload } = parsed;
+                const accessToken = payload?.accessToken;
+                const lockdownToken = payload?.lockdownToken;
+                if (!accessToken && !lockdownToken) {
+                    ws.end(4400, 'missing accessToken or lockdownToken');
+                    return;
+                }
+                const user = await (0, auth_1.authenticateByToken)(accessToken, lockdownToken);
+                if (!user) {
+                    ws.end(4401, 'Unauthorized');
+                    return;
+                }
+                data.userId = user.userId;
+                data.user = user;
+                data.initialized = true;
+                connectionManager.add(user.userId, ws);
+                await redis.setUserNode(user.userId);
+                ws.send(JSON.stringify({ type: 'connection_ack' }));
+                console.log(`[WS] user ${user.userId} initialized, total: ${connectionManager.size()}`);
+                return;
+            }
+            // ── 2. 已初始化：处理各类消息 ─────────────────────────────────────────
+            switch (msg.type) {
+                case 'ping': {
+                    ws.send(JSON.stringify({ type: 'pong' }));
+                    break;
+                }
+                case 'subscribe': {
+                    const { id, payload: topic } = parsed;
+                    if (!id || typeof topic !== 'string') {
+                        console.warn('[WS] invalid subscribe message, ignored');
+                        return;
+                    }
+                    // 验证 topic 是否支持
+                    const success = subscriptionManager.subscribe(topic, id, ws);
+                    if (!success) {
+                        // 返回错误响应
+                        ws.send(JSON.stringify({
+                            id,
+                            type: 'error',
+                            payload: { message: `unsupported topic: ${topic}` }
+                        }));
+                    }
+                    break;
+                }
+                case 'complete': {
+                    const { id } = parsed;
+                    if (!id)
+                        return;
+                    const topic = data.subscriptions.get(id);
+                    if (topic) {
+                        subscriptionManager.unsubscribe(topic, id);
+                        data.subscriptions.delete(id);
+                    }
+                    break;
+                }
+                default:
+                    console.warn('[WS] unknown message type:', msg.type);
             }
         },
         close: async (ws, code) => {
-            const { userId } = ws.getUserData();
+            const { userId, initialized } = ws.getUserData();
+            if (!initialized) {
+                console.log(`[WS] uninitialized connection closed (${code})`);
+                return;
+            }
+            // 清理该连接的所有订阅
+            subscriptionManager.unsubscribeAll(ws);
             connectionManager.remove(userId, ws);
             if (!connectionManager.hasUser(userId)) {
                 await redis.removeUserNode(userId);
@@ -92,11 +156,26 @@ function createServer() {
         },
     });
     app.get('/health', (res) => {
+        const healthy = !state.isDraining && redis.isHealthy();
+        res.writeStatus(healthy ? '200 OK' : '503 Service Unavailable');
         res.writeHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({
-            status: 'ok',
+            status: healthy ? 'ok' : 'degraded',
             nodeId: config_1.default.server.nodeId,
+            redis: healthy ? 'ok' : 'unavailable',
+            draining: state.isDraining,
             connections: connectionManager.size(),
+            subscriptions: subscriptionManager.size(),
+        }));
+    });
+    app.get('/ready', async (res) => {
+        const healthy = !state.isDraining && await redis.ping();
+        res.writeStatus(healthy ? '200 OK' : '503 Service Unavailable');
+        res.writeHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({
+            status: healthy ? 'ready' : 'not_ready',
+            nodeId: config_1.default.server.nodeId,
+            draining: state.isDraining,
         }));
     });
     return app;

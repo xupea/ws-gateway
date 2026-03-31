@@ -7,13 +7,13 @@
 ```
 Java 服务端
     │
-    │  发消息（RabbitMQ）
+    │  发布消息（Redis Pub/Sub）
     ▼
 ┌─────────────────────────────────────────┐
-│              RabbitMQ                   │
-│           队列: ws.push                 │
+│                Redis                    │
+│         channel: ws:push                │
 └────────────┬────────────────────────────┘
-             │ 消费
+             │ 订阅入口消息
     ┌────────┼────────┐
     ▼        ▼        ▼
   Node1    Node2    Node3      ← 多节点横向扩展
@@ -30,7 +30,7 @@ Java 服务端
 
 **消息路由逻辑：**
 1. 用户连接时，Redis 记录 `userId → nodeId`
-2. 任意节点从 RabbitMQ 消费到消息后，先检查目标用户是否在本节点
+2. 任意节点从 Redis 入口 channel 收到消息后，先检查目标用户是否在本节点
 3. 在本节点 → 直接推送；不在 → 查 Redis 找到目标节点，通过 Redis Pub/Sub 转发
 
 ## 技术栈
@@ -38,7 +38,7 @@ Java 服务端
 | 模块 | 选型 |
 |------|------|
 | WebSocket 服务器 | uWebSockets.js |
-| 消息队列 | RabbitMQ（amqplib，可替换） |
+| 消息入口 | Redis Pub/Sub（ioredis） |
 | 节点路由 | Redis Pub/Sub（ioredis） |
 | 语言 | TypeScript |
 
@@ -49,10 +49,7 @@ ws-gateway/
 ├── src/
 │   ├── types/index.ts          # 公共类型定义
 │   ├── config/index.ts         # 配置（读环境变量）
-│   ├── mq/
-│   │   ├── index.ts            # MQ 抽象类（换 Kafka 只改这里）
-│   │   └── rabbitmq.ts         # RabbitMQ 实现
-│   ├── redis/index.ts          # Redis 连接 + 路由逻辑
+│   ├── redis/index.ts          # Redis 连接 + 入口订阅 + 路由逻辑
 │   ├── auth/index.ts           # 认证（调 Java HTTP 接口）
 │   ├── connection/manager.ts   # 本节点连接管理
 │   ├── dispatcher/index.ts     # 消息分发核心逻辑
@@ -76,6 +73,8 @@ cp .env.example .env
 |------|--------|------|
 | `PORT` | `3000` | 监听端口 |
 | `NODE_ID` | `node-{pid}` | 节点唯一标识，多节点部署时必须各不相同 |
+| `WS_IDLE_TIMEOUT_SEC` | `120` | WebSocket 空闲超时（秒），建议与客户端 ping 周期配合使用 |
+| `SHUTDOWN_GRACE_MS` | `10000` | 收到退出信号后摘流量并等待连接自然结束的时间（毫秒） |
 | `AUTH_VALIDATE_URL` | `http://localhost:8080/internal/session/validate` | Java 认证接口地址（保留备用，Cookie 方式） |
 | `AUTH_TOKEN_VALIDATE_URL` | `http://localhost:8080/internal/token/validate` | **推荐** Java 认证接口地址（WebSocket connection_init 方式） |
 | `SESSION_COOKIE_NAME` | `session` | session cookie 名称 |
@@ -85,16 +84,14 @@ cp .env.example .env
 | `REDIS_PORT` | `6379` | Redis 端口 |
 | `REDIS_PASSWORD` | — | Redis 密码（可选） |
 | `REDIS_DB` | `0` | Redis 数据库编号 |
-| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672` | RabbitMQ 连接串 |
-| `RABBITMQ_QUEUE` | `ws.push` | Gateway 消费的队列名 |
-| `RABBITMQ_PREFETCH` | `100` | 每节点最大未 ack 消息数 |
+| `REDIS_INGRESS_CHANNEL` | `ws:push` | Gateway 订阅的入口消息 channel |
 
 ## 本地开发
 
 ### 前置条件
 
 - Node.js 20+
-- Docker（用于启动 Redis + RabbitMQ）
+- Docker（用于启动 Redis）
 
 ### 启动
 
@@ -104,10 +101,10 @@ cp .env.example .env
 npm install
 ```
 
-**2. 启动 Redis 和 RabbitMQ**
+**2. 启动 Redis**
 
 ```bash
-docker compose up redis rabbitmq -d
+docker compose up redis -d
 ```
 
 **3. 配置环境变量**
@@ -135,8 +132,7 @@ npm run dev   # 监听 :3001
 
 ### 测试推送消息
 
-打开 RabbitMQ 管理界面 `http://localhost:15672`（账号/密码均为 `guest`），
-进入 `ws.push` 队列，手动发布消息：
+用 `redis-cli` 向 `ws:push` channel 发布 JSON 消息：
 
 **推送给指定用户：**
 ```json
@@ -155,6 +151,12 @@ npm run dev   # 监听 :3001
   "event": "announcement",
   "data": { "text": "Hello everyone!" }
 }
+```
+
+示例命令：
+
+```bash
+redis-cli PUBLISH ws:push '{"type":"broadcast","event":"announcement","data":{"text":"Hello everyone!"}}'
 ```
 
 ## Docker 部署
@@ -222,9 +224,9 @@ Content-Type: application/json
 
 **失败响应：** HTTP 401
 
-### MQ 消息格式
+### 入口消息格式
 
-Java 向 `ws.push` 队列发送 JSON 消息：
+Java 向 Redis `ws:push` channel 发布 JSON 消息：
 
 **推给指定用户：**
 ```json
@@ -241,6 +243,15 @@ Java 向 `ws.push` 队列发送 JSON 消息：
 {
   "type": "broadcast",
   "event": "事件名",
+  "data": {}
+}
+```
+
+**推给订阅了指定 topic 的连接：**
+```json
+{
+  "type": "topic",
+  "topic": "ws.available-balances",
   "data": {}
 }
 ```
@@ -289,7 +300,7 @@ Java 向 `ws.push` 队列发送 JSON 消息：
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "type": "subscribe",
-  "payload": "AvailableBalances"
+  "payload": "ws.available-balances"
 }
 ```
 
@@ -300,8 +311,10 @@ Java 向 `ws.push` 队列发送 JSON 消息：
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "type": "next",
   "payload": {
-    "amount": 100,
-    "currency": "USD"
+    "data": {
+      "amount": 100,
+      "currency": "USD"
+    }
   }
 }
 ```
@@ -331,6 +344,8 @@ Java 向 `ws.push` 队列发送 JSON 消息：
 { "type": "pong" }
 ```
 
+生产环境建议客户端每 30-60 秒发送一次 `ping`，避免 Cloudflare 或 ALB 因连接长期空闲而主动断开。
+
 #### 5. 健康检查接口
 
 ```
@@ -341,13 +356,31 @@ GET /health
 {
   "status": "ok",
   "nodeId": "node-1",
+  "redis": "ok",
+  "draining": false,
   "connections": 42,
   "subscriptions": 128
 }
 ```
 
-## 替换 MQ
+当实例进入优雅停机阶段或 Redis 不可用时，`/health` 会返回 `503`。
 
-当前 RabbitMQ 实现在 `src/mq/rabbitmq.ts`，继承自 `src/mq/index.ts` 的抽象类。
+#### 6. 就绪检查接口
 
-替换为 Kafka 时，只需新建 `src/mq/kafka.ts` 实现同一抽象类，然后在 `src/index.ts` 替换导入即可，其余代码无需改动。
+```
+GET /ready
+```
+
+用于负载均衡摘流量或容器启动探针。服务处于摘流量阶段，或 Redis `PING` 失败时，该接口返回 `503`。
+
+## 消息模型说明
+
+Java 侧只需要做一件事：向 Redis `ws:push` channel 发布 JSON 消息，Gateway 会负责后续分发。
+
+- `type=user`：网关会查找用户当前所在节点，并只把消息推给该用户的在线连接
+- `type=broadcast`：每个网关节点都会把消息广播给自己持有的在线连接
+- `type=topic`：每个网关节点都会把消息推给本节点上订阅了该 topic 的连接
+
+节点之间的定向转发走 `ws:route:{nodeId}` channel，这部分对业务方透明，不需要额外处理。
+
+需要注意的是，当前方案是“在线尽力投递”模型：只保证消息发给当前在线的连接，不提供消息持久化、消费确认、失败重放或离线补发能力。

@@ -4,7 +4,9 @@ dotenv.config();
 const config = {
   server: {
     port: parseInt(process.env.PORT ?? '3000'),
-    nodeId: process.env.NODE_ID ?? `node-${process.pid}`,
+    nodeId: process.env.NODE_ID ?? process.env.HOSTNAME ?? `node-${process.pid}`,
+    wsIdleTimeout: parseInt(process.env.WS_IDLE_TIMEOUT_SEC ?? '120'),
+    shutdownGraceMs: parseInt(process.env.SHUTDOWN_GRACE_MS ?? '10000'),
   },
 
   auth: {
@@ -22,13 +24,8 @@ const config = {
     password: process.env.REDIS_PASSWORD || undefined,
     db: parseInt(process.env.REDIS_DB ?? '0'),
     userNodePrefix: 'ws:user_node:',
+    ingressChannel: process.env.REDIS_INGRESS_CHANNEL ?? 'ws:push',
     routeChannelPrefix: 'ws:route:',
-  },
-
-  rabbitmq: {
-    url: process.env.RABBITMQ_URL ?? 'amqp://guest:guest@localhost:5672',
-    queue: process.env.RABBITMQ_QUEUE ?? 'ws.push',
-    prefetch: parseInt(process.env.RABBITMQ_PREFETCH ?? '100'),
   },
 } as const;
 
