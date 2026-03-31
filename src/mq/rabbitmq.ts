@@ -10,14 +10,21 @@ export class RabbitMQConsumer extends MQConsumer {
     this.connection = await amqplib.connect(config.rabbitmq.url);
     this.channel = await this.connection.createChannel();
 
-    // 声明 topic exchange
-    await this.channel.assertExchange('stake.topic', 'topic', { durable: true });
+    // 声明 consistent-hash exchange
+    // Java 发消息时 routing key = userId，RabbitMQ 按 hash(userId) 路由到对应节点队列
+    await this.channel.assertExchange('stake.topic', 'x-consistent-hash', { durable: true });
 
-    // 声明队列
-    await this.channel.assertQueue(config.rabbitmq.queue, { durable: true });
+    // 每个节点声明自己的专属队列，设置消息 TTL 防止节点宕机时过期消息堆积
+    const perNodeQueue = `${config.rabbitmq.queue}.${config.server.nodeId}`;
+    await this.channel.assertQueue(perNodeQueue, {
+      durable: true,
+      arguments: {
+        'x-message-ttl': config.rabbitmq.messageTtlMs,  // 消息超时自动丢弃（押注场景关键）
+      },
+    });
 
-    // 绑定队列到 exchange，pattern: push.#
-    await this.channel.bindQueue(config.rabbitmq.queue, 'stake.topic', 'push.#');
+    // 绑定到 exchange，routing key 为权重字符串，所有节点权重相同保证均匀分配
+    await this.channel.bindQueue(perNodeQueue, 'stake.topic', config.rabbitmq.bindingWeight);
 
     this.channel.prefetch(config.rabbitmq.prefetch);
 
@@ -29,13 +36,14 @@ export class RabbitMQConsumer extends MQConsumer {
       setTimeout(() => this.connect(), 5000);
     });
 
-    console.log(`[RabbitMQ] connected, exchange: stake.topic, queue: ${config.rabbitmq.queue}, pattern: push.#`);
+    console.log(`[RabbitMQ] connected, exchange: stake.topic (x-consistent-hash), queue: ${perNodeQueue}, ttl: ${config.rabbitmq.messageTtlMs}ms`);
   }
 
   async subscribe(handler: MessageHandler): Promise<void> {
     if (!this.channel) throw new Error('RabbitMQ not connected');
 
-    this.channel.consume(config.rabbitmq.queue, async (msg) => {
+    const perNodeQueue = `${config.rabbitmq.queue}.${config.server.nodeId}`;
+    this.channel.consume(perNodeQueue, async (msg) => {
       if (!msg) return;
       try {
         const message = JSON.parse(msg.content.toString());

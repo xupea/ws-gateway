@@ -3,62 +3,48 @@ import type { WsUserData, PushMessage } from '../types';
 
 type WS = WebSocket<WsUserData>;
 
-// userId → Set<WebSocket>（同一用户可能多个 tab 同时连接）
-const connections = new Map<string, Set<WS>>();
+// authToken → WebSocket（1 authToken = 1 连接，不支持多 tab / 多端登录）
+const connections = new Map<string, WS>();
 
-export function add(userId: string, ws: WS): void {
-  if (!connections.has(userId)) {
-    connections.set(userId, new Set());
-  }
-  connections.get(userId)!.add(ws);
+export function add(authToken: string, ws: WS): void {
+  connections.set(authToken, ws);
 }
 
-export function remove(userId: string, ws: WS): void {
-  const sockets = connections.get(userId);
-  if (!sockets) return;
-  sockets.delete(ws);
-  if (sockets.size === 0) connections.delete(userId);
+export function remove(authToken: string): void {
+  connections.delete(authToken);
 }
 
 /**
- * 向本节点的指定用户推送消息
- * @returns 是否找到该用户的连接
+ * 向本节点的指定 session（authToken）推送消息
+ * @returns 是否找到该连接
  */
-export function sendToUser(userId: string, message: PushMessage): boolean {
-  const sockets = connections.get(userId);
-  if (!sockets || sockets.size === 0) return false;
+export function sendToSession(authToken: string, message: PushMessage): boolean {
+  const ws = connections.get(authToken);
+  if (!ws) return false;
 
-  const data = JSON.stringify(message);
-  for (const ws of sockets) {
-    try {
-      ws.send(data);
-    } catch (err) {
-      console.error(`[Connection] send to user ${userId} error:`, (err as Error).message);
-    }
+  try {
+    ws.send(JSON.stringify(message));
+  } catch (err) {
+    console.error(`[Connection] send to session error:`, (err as Error).message);
   }
   return true;
 }
 
 export function broadcast(message: PushMessage): void {
   const data = JSON.stringify(message);
-  for (const sockets of connections.values()) {
-    for (const ws of sockets) {
-      try {
-        ws.send(data);
-      } catch {
-        // ignore individual send errors
-      }
+  for (const ws of connections.values()) {
+    try {
+      ws.send(data);
+    } catch {
+      // ignore individual send errors
     }
   }
 }
 
-export function hasUser(userId: string): boolean {
-  const sockets = connections.get(userId);
-  return !!sockets && sockets.size > 0;
+export function hasSession(authToken: string): boolean {
+  return connections.has(authToken);
 }
 
 export function size(): number {
-  let count = 0;
-  for (const sockets of connections.values()) count += sockets.size;
-  return count;
+  return connections.size;
 }

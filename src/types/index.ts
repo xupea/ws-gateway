@@ -1,13 +1,6 @@
-// 认证成功后的用户信息（和 Java 接口返回结构对齐）
-export interface AuthUser {
-  userId: string;
-  [key: string]: unknown;
-}
-
-// WebSocket 连接上挂载的用户数据
+// WebSocket 连接上挂载的数据，Gateway 不持有用户身份信息
 export interface WsUserData {
-  userId: string;
-  user: AuthUser | null;
+  authToken: string;
   initialized: boolean;
   /** 当前连接的所有订阅：subscriptionId → topic */
   subscriptions: Map<string, string>;
@@ -49,36 +42,33 @@ export interface NextMessage {
   payload: { data: unknown };
 }
 
-// ---------- MQ 消息基础结构 ----------
-export type MessageType = 'user' | 'broadcast' | 'topic';
+// ---------- MQ 消息结构 ----------
+export type MessageType = 'session' | 'broadcast' | 'topic';
 
-export interface BaseMessage {
-  type: MessageType;
+// 推给指定 session（以 authToken 标识，Gateway 不持有 userId）
+export interface SessionMessage {
+  type: 'session';
+  authToken: string;   // Java 侧用 userId 作 routing key，body 中放 authToken
   event: string;
   data: unknown;
 }
 
-// 推给指定用户
-export interface UserMessage extends BaseMessage {
-  type: 'user';
-  userId: string;
-}
-
-// 广播给所有人
-export interface BroadcastMessage extends BaseMessage {
+// 广播给所有在线连接
+export interface BroadcastMessage {
   type: 'broadcast';
+  event: string;
+  data: unknown;
 }
 
 // 推送给订阅了某个 topic 的所有连接
 export interface TopicPushMessage {
   type: 'topic';
-  topic: string;  // 对应客户端 subscribe payload
+  topic: string;
   data: unknown;
 }
 
-export type PushMessage = UserMessage | BroadcastMessage | TopicPushMessage;
+export type PushMessage = SessionMessage | BroadcastMessage | TopicPushMessage;
 
-// WebSocket 连接上挂载的用户数据（需要 subscriptions 字段，在此导出便于复用）
 export type SubscriptionMap = Map<string, string>; // subscriptionId → topic
 
 // 支持的 WebSocket topics 列表（必须与 Java 端对齐）

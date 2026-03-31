@@ -7,32 +7,14 @@ services:
     environment:
       PORT: 3000
       NODE_ID: node-1
-      AUTH_VALIDATE_URL: http://java-backend:8080/internal/session/validate
-      SESSION_COOKIE_NAME: session
+      AUTH_TOKEN_VALIDATE_URL: http://java-backend:8080/internal/token/validate
       AUTH_TIMEOUT_MS: 3000
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
       RABBITMQ_QUEUE: ws.push
     depends_on:
-      redis:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
@@ -43,6 +25,7 @@ services:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
     volumes:
+      - ./rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins  # 开启 consistent_hash_exchange 插件
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
@@ -51,5 +34,4 @@ services:
       retries: 10
 
 volumes:
-  redis_data:
   rabbitmq_data:

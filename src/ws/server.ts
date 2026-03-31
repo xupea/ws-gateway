@@ -2,7 +2,6 @@ import uWS from 'uWebSockets.js';
 import { authenticateByToken } from '../auth';
 import * as connectionManager from '../connection/manager';
 import * as subscriptionManager from '../subscription/manager';
-import * as redis from '../redis';
 import config from '../config';
 import type { WsUserData, ConnectionInitMessage, SubscribeMessage, CompleteMessage } from '../types';
 
@@ -20,7 +19,7 @@ export function createServer(): uWS.TemplatedApp {
 
       // 不在握手阶段做认证，等待客户端发送 connection_init
       res.upgrade<WsUserData>(
-        { userId: '', user: null, initialized: false, subscriptions: new Map() },
+        { authToken: '', initialized: false, subscriptions: new Map() },
         secKey, secProtocol, secExtension,
         context,
       );
@@ -59,22 +58,21 @@ export function createServer(): uWS.TemplatedApp {
           return;
         }
 
-        const user = await authenticateByToken(accessToken, lockdownToken);
-        if (!user) {
+        const valid = await authenticateByToken(accessToken, lockdownToken);
+        if (!valid) {
           ws.end(4401, 'Unauthorized');
           return;
         }
 
-        data.userId = user.userId;
-        data.user = user;
+        // 以 accessToken 或 lockdownToken 作为本连接的唯一标识
+        const token = (accessToken || lockdownToken)!;
+        data.authToken = token;
         data.initialized = true;
 
-        connectionManager.add(user.userId, ws);
-        // 写入 Redis 供 dispatcher fallback 查询（LB 未做一致性哈希时使用）
-        await redis.setUserNode(user.userId);
+        connectionManager.add(token, ws);
 
         ws.send(JSON.stringify({ type: 'connection_ack' }));
-        console.log(`[WS] user ${user.userId} initialized, total: ${connectionManager.size()}`);
+        console.log(`[WS] session initialized, total: ${connectionManager.size()}`);
         return;
       }
 
@@ -122,8 +120,8 @@ export function createServer(): uWS.TemplatedApp {
       }
     },
 
-    close: async (ws, code) => {
-      const { userId, initialized } = ws.getUserData();
+    close: (ws, code) => {
+      const { authToken, initialized } = ws.getUserData();
 
       if (!initialized) {
         console.log(`[WS] uninitialized connection closed (${code})`);
@@ -133,12 +131,8 @@ export function createServer(): uWS.TemplatedApp {
       // 清理该连接的所有订阅
       subscriptionManager.unsubscribeAll(ws);
 
-      connectionManager.remove(userId, ws);
-      if (!connectionManager.hasUser(userId)) {
-        // 该用户的最后一个连接断开，清除 Redis 中的节点记录
-        await redis.removeUserNode(userId);
-      }
-      console.log(`[WS] user ${userId} disconnected (${code}), total: ${connectionManager.size()}`);
+      connectionManager.remove(authToken);
+      console.log(`[WS] session disconnected (${code}), total: ${connectionManager.size()}`);
     },
   });
 
