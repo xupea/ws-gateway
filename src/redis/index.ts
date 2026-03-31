@@ -30,6 +30,61 @@ export async function connect(): Promise<void> {
   console.log('[Redis] connected');
 }
 
+// ── 集群成员管理 ──────────────────────────────────────────────────────────────
+
+/**
+ * 注册本节点并续期心跳 TTL
+ */
+export async function registerNode(nodeId: string): Promise<void> {
+  const ttlSec = Math.ceil(config.cluster.heartbeatTtlMs / 1000);
+  await client
+    .multi()
+    .sadd(config.redis.clusterNodesKey, nodeId)
+    .set(`${config.redis.clusterHbPrefix}${nodeId}`, '1', 'EX', ttlSec)
+    .exec();
+}
+
+/**
+ * 节点退出时主动注销（加速感知，不等 TTL 过期）
+ */
+export async function deregisterNode(nodeId: string): Promise<void> {
+  await client
+    .multi()
+    .srem(config.redis.clusterNodesKey, nodeId)
+    .del(`${config.redis.clusterHbPrefix}${nodeId}`)
+    .exec();
+}
+
+/**
+ * 获取当前存活节点列表，并顺手清理已过期的节点记录
+ */
+export async function getLiveNodes(): Promise<string[]> {
+  const allNodes = await client.smembers(config.redis.clusterNodesKey);
+  if (allNodes.length === 0) return [];
+
+  const pipeline = client.pipeline();
+  for (const nodeId of allNodes) {
+    pipeline.exists(`${config.redis.clusterHbPrefix}${nodeId}`);
+  }
+  const results = await pipeline.exec();
+
+  const live: string[] = [];
+  const dead: string[] = [];
+  for (let i = 0; i < allNodes.length; i++) {
+    const exists = (results![i][1] as number);
+    if (exists) live.push(allNodes[i]);
+    else dead.push(allNodes[i]);
+  }
+
+  if (dead.length > 0) {
+    await client.srem(config.redis.clusterNodesKey, ...dead);
+  }
+
+  return live;
+}
+
+// ── 用户节点映射（供 dispatcher fallback 查询） ──────────────────────────────
+
 export async function setUserNode(userId: string): Promise<void> {
   await client.set(
     `${config.redis.userNodePrefix}${userId}`,

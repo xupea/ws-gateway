@@ -4,6 +4,8 @@ dotenv.config();
 const config = {
   server: {
     port: parseInt(process.env.PORT ?? '3000'),
+    // NODE_ID 由 bootstrap.ts 在启动阶段异步解析后写入 process.env，
+    // 此处同步读取时已保证有值（ECS Task ARN 末段 或 PID 兜底）
     nodeId: process.env.NODE_ID ?? `node-${process.pid}`,
   },
 
@@ -21,8 +23,19 @@ const config = {
     port: parseInt(process.env.REDIS_PORT ?? '6379'),
     password: process.env.REDIS_PASSWORD || undefined,
     db: parseInt(process.env.REDIS_DB ?? '0'),
-    userNodePrefix: 'ws:user_node:',
+    userNodePrefix: 'ws:user_node:',      // fallback 路由用
     routeChannelPrefix: 'ws:route:',
+    clusterNodesKey: 'ws:cluster:nodes',
+    clusterHbPrefix: 'ws:cluster:hb:',
+  },
+
+  cluster: {
+    // 心跳间隔（ms），节点每隔此时间续期并同步成员列表
+    heartbeatIntervalMs: parseInt(process.env.CLUSTER_HEARTBEAT_INTERVAL_MS ?? '5000'),
+    // 心跳 TTL（ms），超过此时间未续期则视为节点下线
+    heartbeatTtlMs: parseInt(process.env.CLUSTER_HEARTBEAT_TTL_MS ?? '15000'),
+    // 每个真实节点的虚拟节点数，越大分布越均匀
+    virtualNodes: parseInt(process.env.CLUSTER_VIRTUAL_NODES ?? '150'),
   },
 
   rabbitmq: {
