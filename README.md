@@ -128,7 +128,85 @@ npm install
 npm run dev   # 监听 :3001
 ```
 
-打开 `http://localhost:3001`，勾选 "Logged In" 选项或保持未勾选状态（游客），填入对应的 accessToken 或 lockdownToken，点击 Connect 即可连接。
+打开 `http://localhost:3001`，勾选 `Logged In` 时填写 `authToken`，未勾选时填写 `lockdownToken`，点击 `Connect` 即可连接。
+
+### 本地测试
+
+推荐按下面顺序验证：
+
+**1. 确认 Redis 可用**
+
+```bash
+redis-cli -h 127.0.0.1 -p 6379 ping
+```
+
+返回 `PONG` 说明 Redis 已就绪。
+
+**2. 用 demo 建立 WebSocket 连接**
+
+- 打开 `http://localhost:3001`
+- WebSocket 地址填写 `ws://localhost:3000/ws`
+- 本地调试时建议在 `.env` 中设置 `DEV_AUTH_BYPASS=true`
+- 勾选 `Logged In` 时填写任意 `authToken`，例如 `user-1`
+- 未勾选 `Logged In` 时填写任意 `lockdownToken`
+- 点击 `Connect`
+- 看到状态变成 `Initialized` 说明连接成功
+
+在 `DEV_AUTH_BYPASS=true` 时：
+
+- 已登录场景会把 `authToken` 映射成服务端收到的 `accessToken`
+- 未登录场景会把 `lockdownToken` 直接作为用户标识使用
+
+**3. 测试广播消息**
+
+```bash
+redis-cli -h 127.0.0.1 -p 6379 PUBLISH ws:push '{"type":"broadcast","event":"announcement","data":{"text":"hello"}}'
+```
+
+demo 日志中应能看到一条 `broadcast` 消息。
+
+**4. 测试用户消息**
+
+如果上一步连接时填写的是 `authToken=user-1`，则可执行：
+
+```bash
+redis-cli -h 127.0.0.1 -p 6379 PUBLISH ws:push '{"type":"user","userId":"user-1","event":"balance_update","data":{"balance":999}}'
+```
+
+demo 日志中应能看到该用户消息。
+
+**5. 测试 topic 订阅**
+
+先在 demo 中订阅 `ws.available-balances`，客户端会发送：
+
+```json
+{
+  "id": "59937ee9-aa79-40e9-95da-15ed1780ba91",
+  "type": "subscribe",
+  "payload": "ws.available-balances"
+}
+```
+
+然后在终端执行：
+
+```bash
+redis-cli -h 127.0.0.1 -p 6379 PUBLISH ws:push '{"type":"topic","topic":"ws.available-balances","data":{"amount":100,"currency":"USD"}}'
+```
+
+如果订阅成功，客户端会收到：
+
+```json
+{
+  "id": "59937ee9-aa79-40e9-95da-15ed1780ba91",
+  "type": "next",
+  "payload": {
+    "data": {
+      "amount": 100,
+      "currency": "USD"
+    }
+  }
+}
+```
 
 ### 测试推送消息
 
