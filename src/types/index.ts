@@ -11,6 +11,10 @@ export interface WsUserData {
   initialized: boolean;
   /** 当前连接的所有订阅：subscriptionId → topic */
   subscriptions: Map<string, string>;
+  /** connection_init 超时计时器，认证成功或连接关闭时清除 */
+  initTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 本次连接使用的 token，被踢时用于清除本地认证缓存 */
+  token: string;
 }
 
 // connection_init 消息的 payload
@@ -50,7 +54,7 @@ export interface NextMessage {
 }
 
 // ---------- 网关入口消息基础结构 ----------
-export type MessageType = 'user' | 'broadcast' | 'topic';
+export type MessageType = 'user' | 'topic';
 
 export interface BaseMessage {
   type: MessageType;
@@ -64,11 +68,6 @@ export interface UserMessage extends BaseMessage {
   userId: string;
 }
 
-// 广播给所有人
-export interface BroadcastMessage extends BaseMessage {
-  type: 'broadcast';
-}
-
 // 推送给订阅了某个 topic 的所有连接
 export interface TopicPushMessage {
   type: 'topic';
@@ -76,7 +75,13 @@ export interface TopicPushMessage {
   data: unknown;
 }
 
-export type PushMessage = UserMessage | BroadcastMessage | TopicPushMessage;
+// 节点间互踢指令（仅用于 ws:route:{nodeId} 通道，不由 Java 发布）
+export interface KickMessage {
+  type: 'kick';
+  userId: string;
+}
+
+export type PushMessage = UserMessage | TopicPushMessage | KickMessage;
 
 // WebSocket 连接上挂载的用户数据（需要 subscriptions 字段，在此导出便于复用）
 export type SubscriptionMap = Map<string, string>; // subscriptionId → topic

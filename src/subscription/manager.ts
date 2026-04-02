@@ -34,6 +34,13 @@ export function subscribe(topic: string, subscriptionId: string, ws: WS): boolea
     return false;
   }
 
+  // 同一连接重复使用同一个 subscriptionId 时，先摘掉旧 topic，避免幽灵订阅残留
+  const existingTopic = ws.getUserData().subscriptions.get(subscriptionId);
+  if (existingTopic && existingTopic !== topic) {
+    unsubscribe(existingTopic, subscriptionId);
+    ws.getUserData().subscriptions.delete(subscriptionId);
+  }
+
   if (!topicRegistry.has(topic)) {
     topicRegistry.set(topic, new Map());
   }
@@ -95,4 +102,8 @@ export function size(): number {
   let count = 0;
   for (const subs of topicRegistry.values()) count += subs.size;
   return count;
+}
+
+export function __resetForTests(): void {
+  topicRegistry.clear();
 }

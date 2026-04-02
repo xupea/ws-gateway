@@ -2,6 +2,13 @@
 
 基于 Node.js + uWebSockets.js 实现的高性能 WebSocket 推送网关，支持横向扩展。
 
+当前协议只保留两类服务端消息：
+
+- `user`：推给指定用户
+- `topic`：推给主动订阅了某个 topic 的连接
+
+不再提供默认 `broadcast`。客户端必须在连接建立后，显式订阅自己关心的 topic。
+
 ## 架构
 
 ```
@@ -11,27 +18,28 @@ Java 服务端
     ▼
 ┌─────────────────────────────────────────┐
 │                Redis                    │
-│         channel: ws:push                │
+│   ws:push:topic:{topic}   ws:route:*    │
 └────────────┬────────────────────────────┘
-             │ 订阅入口消息
+             │
     ┌────────┼────────┐
     ▼        ▼        ▼
   Node1    Node2    Node3      ← 多节点横向扩展
     │        │        │
+    │        │        └── 各自维护本机连接和订阅
+    │        │
     └────────┼────────┘
-             │ 节点间路由（Redis Pub/Sub）
-             ▼
-          Redis
-    （记录 userId → 节点映射）
              │
              ▼
-          客户端
+      ws:user_node:{userId}
+      （记录 userId → nodeId）
 ```
 
 **消息路由逻辑：**
-1. 用户连接时，Redis 记录 `userId → nodeId`
-2. 任意节点从 Redis 入口 channel 收到消息后，先检查目标用户是否在本节点
-3. 在本节点 → 直接推送；不在 → 查 Redis 找到目标节点，通过 Redis Pub/Sub 转发
+
+1. 用户连接成功后，Redis 记录 `userId -> nodeId`
+2. Java 发布 `user` 消息前，先查 `ws:user_node:{userId}`，再精准发布到 `ws:route:{nodeId}`
+3. Java 发布 `topic` 消息时，直接发到 `ws:push:topic:{topic}`
+4. 所有节点都会收到 topic 消息，但只推给本机上订阅了该 topic 的连接
 
 ## 技术栈
 
@@ -47,15 +55,17 @@ Java 服务端
 ```
 ws-gateway/
 ├── src/
-│   ├── types/index.ts          # 公共类型定义
-│   ├── config/index.ts         # 配置（读环境变量）
-│   ├── redis/index.ts          # Redis 连接 + 入口订阅 + 路由逻辑
-│   ├── auth/index.ts           # 认证（调 Java HTTP 接口）
-│   ├── connection/manager.ts   # 本节点连接管理
-│   ├── dispatcher/index.ts     # 消息分发核心逻辑
-│   ├── ws/server.ts            # WebSocket 服务器
-│   └── index.ts                # 启动入口
-├── demo/                       # 本地调试用 Next.js 客户端
+│   ├── types/index.ts
+│   ├── config/index.ts
+│   ├── redis/index.ts
+│   ├── auth/index.ts
+│   ├── connection/manager.ts
+│   ├── subscription/manager.ts
+│   ├── dispatcher/index.ts
+│   ├── ws/server.ts
+│   └── index.ts
+├── demo/
+├── test/
 ├── Dockerfile
 ├── docker-compose.yml
 └── .env.example
@@ -73,18 +83,22 @@ cp .env.example .env
 |------|--------|------|
 | `PORT` | `3000` | 监听端口 |
 | `NODE_ID` | `node-{pid}` | 节点唯一标识，多节点部署时必须各不相同 |
-| `WS_IDLE_TIMEOUT_SEC` | `120` | WebSocket 空闲超时（秒），建议与客户端 ping 周期配合使用 |
-| `SHUTDOWN_GRACE_MS` | `10000` | 收到退出信号后摘流量并等待连接自然结束的时间（毫秒） |
+| `WS_IDLE_TIMEOUT_SEC` | `120` | WebSocket 空闲超时（秒） |
+| `WS_INIT_TIMEOUT_MS` | `10000` | 建连后等待 `connection_init` 的最长时间 |
+| `WS_MAX_SUBSCRIPTIONS` | `20` | 单连接允许的最大订阅数 |
+| `SHUTDOWN_GRACE_MS` | `10000` | 收到退出信号后的优雅停机等待时间（毫秒） |
 | `AUTH_VALIDATE_URL` | `http://localhost:8080/internal/session/validate` | Java 认证接口地址（保留备用，Cookie 方式） |
-| `AUTH_TOKEN_VALIDATE_URL` | `http://localhost:8080/internal/token/validate` | **推荐** Java 认证接口地址（WebSocket connection_init 方式） |
-| `SESSION_COOKIE_NAME` | `session` | session cookie 名称 |
+| `AUTH_TOKEN_VALIDATE_URL` | `http://localhost:8080/internal/token/validate` | 推荐的 Java 认证接口地址（`connection_init` 方式） |
+| `SESSION_COOKIE_NAME` | `session` | Session Cookie 名称 |
 | `AUTH_TIMEOUT_MS` | `3000` | 认证请求超时（ms） |
-| `DEV_AUTH_BYPASS` | `false` | **仅开发用**，跳过认证，直接用 token 值作为 userId |
+| `DEV_AUTH_BYPASS` | `false` | 仅开发用，跳过认证，直接用 token 作为 userId |
 | `REDIS_HOST` | `127.0.0.1` | Redis 地址 |
 | `REDIS_PORT` | `6379` | Redis 端口 |
 | `REDIS_PASSWORD` | — | Redis 密码（可选） |
 | `REDIS_DB` | `0` | Redis 数据库编号 |
-| `REDIS_INGRESS_CHANNEL` | `ws:push` | Gateway 订阅的入口消息 channel |
+| `REDIS_TOPIC_CHANNEL_PREFIX` | `ws:push:topic:` | Topic 消息 channel 前缀 |
+| `REDIS_USER_NODE_TTL_SEC` | `7200` | `userId -> nodeId` 映射 TTL（秒） |
+| `REDIS_USER_NODE_REFRESH_MS` | `3600000` | 在线映射续期周期（毫秒） |
 
 ## 本地开发
 
@@ -111,13 +125,13 @@ docker compose up redis -d
 
 ```bash
 cp .env.example .env
-# 确保 DEV_AUTH_BYPASS=true（本地无 Java 服务时使用）
+# 本地无 Java 服务时，设置 DEV_AUTH_BYPASS=true
 ```
 
 **4. 启动 Gateway**
 
 ```bash
-npm run dev   # 监听 :3000
+npm run dev
 ```
 
 **5. 启动调试客户端**
@@ -125,75 +139,46 @@ npm run dev   # 监听 :3000
 ```bash
 cd demo
 npm install
-npm run dev   # 监听 :3001
+npm run dev
 ```
 
-打开 `http://localhost:3001`，勾选 `Logged In` 时填写 `authToken`，未勾选时填写 `lockdownToken`，点击 `Connect` 即可连接。
+打开 `http://localhost:3001`，连接 `ws://localhost:3000/ws` 即可调试。
 
-### 本地测试
+## 本地测试
 
-推荐按下面顺序验证：
-
-**1. 确认 Redis 可用**
+### 1. 确认 Redis 可用
 
 ```bash
 redis-cli -h 127.0.0.1 -p 6379 ping
 ```
 
-返回 `PONG` 说明 Redis 已就绪。
+### 2. 用 demo 建立 WebSocket 连接
 
-**2. 用 demo 建立 WebSocket 连接**
-
-- 打开 `http://localhost:3001`
 - WebSocket 地址填写 `ws://localhost:3000/ws`
-- 本地调试时建议在 `.env` 中设置 `DEV_AUTH_BYPASS=true`
-- 勾选 `Logged In` 时填写任意 `authToken`，例如 `user-1`
-- 未勾选 `Logged In` 时填写任意 `lockdownToken`
-- 点击 `Connect`
-- 看到状态变成 `Initialized` 说明连接成功
+- 本地调试建议在 `.env` 中设置 `DEV_AUTH_BYPASS=true`
+- 已登录场景填写任意 `accessToken`，例如 `user-1`
+- 游客场景填写任意 `lockdownToken`
+- 收到 `connection_ack` 后说明连接成功
 
-在 `DEV_AUTH_BYPASS=true` 时：
+### 3. 测试用户消息
 
-- 已登录场景会把 `authToken` 映射成服务端收到的 `accessToken`
-- 未登录场景会把 `lockdownToken` 直接作为用户标识使用
-
-**3. 测试广播消息**
+如果连接使用的是 `accessToken=user-1`：
 
 ```bash
-redis-cli -h 127.0.0.1 -p 6379 PUBLISH ws:push '{"type":"broadcast","event":"announcement","data":{"text":"hello"}}'
+redis-cli -h 127.0.0.1 -p 6379 GET ws:user_node:user-1
+# 假设返回 node-1
+redis-cli -h 127.0.0.1 -p 6379 PUBLISH ws:route:node-1 '{"type":"user","userId":"user-1","event":"balance_update","data":{"balance":999}}'
 ```
 
-demo 日志中应能看到一条 `broadcast` 消息。
+### 4. 测试 topic 订阅
 
-**4. 测试用户消息**
-
-如果上一步连接时填写的是 `authToken=user-1`，则可执行：
+先在 demo 中订阅 `ws.available-balances`，然后执行：
 
 ```bash
-redis-cli -h 127.0.0.1 -p 6379 PUBLISH ws:push '{"type":"user","userId":"user-1","event":"balance_update","data":{"balance":999}}'
+redis-cli -h 127.0.0.1 -p 6379 PUBLISH ws:push:topic:ws.available-balances '{"type":"topic","topic":"ws.available-balances","data":{"amount":100,"currency":"USD"}}'
 ```
 
-demo 日志中应能看到该用户消息。
-
-**5. 测试 topic 订阅**
-
-先在 demo 中订阅 `ws.available-balances`，客户端会发送：
-
-```json
-{
-  "id": "59937ee9-aa79-40e9-95da-15ed1780ba91",
-  "type": "subscribe",
-  "payload": "ws.available-balances"
-}
-```
-
-然后在终端执行：
-
-```bash
-redis-cli -h 127.0.0.1 -p 6379 PUBLISH ws:push '{"type":"topic","topic":"ws.available-balances","data":{"amount":100,"currency":"USD"}}'
-```
-
-如果订阅成功，客户端会收到：
+客户端会收到：
 
 ```json
 {
@@ -208,61 +193,11 @@ redis-cli -h 127.0.0.1 -p 6379 PUBLISH ws:push '{"type":"topic","topic":"ws.avai
 }
 ```
 
-### 测试推送消息
-
-用 `redis-cli` 向 `ws:push` channel 发布 JSON 消息：
-
-**推送给指定用户：**
-```json
-{
-  "type": "user",
-  "userId": "user-1",
-  "event": "balance_update",
-  "data": { "balance": 999 }
-}
-```
-
-**广播给所有人：**
-```json
-{
-  "type": "broadcast",
-  "event": "announcement",
-  "data": { "text": "Hello everyone!" }
-}
-```
-
-示例命令：
-
-```bash
-redis-cli PUBLISH ws:push '{"type":"broadcast","event":"announcement","data":{"text":"Hello everyone!"}}'
-```
-
-## Docker 部署
-
-### 单节点
-
-```bash
-docker compose up -d
-```
-
-### 多节点（横向扩展）
-
-多节点时需用 Nginx 做负载均衡，去掉 `docker-compose.yml` 中 `ws-gateway` 的 `ports` 配置后：
-
-```bash
-docker compose up -d --scale ws-gateway=3
-```
-
-> **注意**：每个节点的 `NODE_ID` 必须唯一，否则 Redis 路由会出错。
-> 生产部署建议通过 Kubernetes 或 ECS 任务 ID 自动注入。
-
 ## Java 对接说明
 
 ### 认证接口（推荐方式）
 
-Gateway 在 WebSocket 连接建立后，等待客户端发送 `connection_init` 消息，其中包含 `accessToken`（已登录用户）或 `lockdownToken`（游客用户）。
-
-Gateway 会调用此接口验证 token：
+Gateway 在 WebSocket 连接建立后，等待客户端发送 `connection_init`，其中包含 `accessToken` 或 `lockdownToken`。
 
 ```
 POST {AUTH_TOKEN_VALIDATE_URL}
@@ -277,36 +212,27 @@ Content-Type: application/json
 { "lockdownToken": "<token>" }
 ```
 
-**成功响应（200）：**
+成功响应：
+
 ```json
 { "userId": "123", "username": "alice" }
 ```
 
-**失败响应：** HTTP 401
+失败响应：HTTP 401
 
-### 认证接口（保留备用 - Cookie 方式）
+### Redis 消息格式
 
-Gateway 在 WebSocket 握手时会调用此接口验证 session（需要客户端在 Cookie 中发送）：
+#### 推给指定用户
 
-```
-POST {AUTH_VALIDATE_URL}
-Content-Type: application/json
+先查节点，再精准投递：
 
-{ "session": "<cookie 值>" }
-```
-
-**成功响应（200）：**
-```json
-{ "userId": "123", "username": "alice" }
+```bash
+GET ws:user_node:{userId}
+PUBLISH ws:route:{nodeId} '{"type":"user","userId":"123","event":"balance_update","data":{}}'
 ```
 
-**失败响应：** HTTP 401
+消息格式：
 
-### 入口消息格式
-
-Java 向 Redis `ws:push` channel 发布 JSON 消息：
-
-**推给指定用户：**
 ```json
 {
   "type": "user",
@@ -316,16 +242,16 @@ Java 向 Redis `ws:push` channel 发布 JSON 消息：
 }
 ```
 
-**广播给所有在线用户：**
-```json
-{
-  "type": "broadcast",
-  "event": "事件名",
-  "data": {}
-}
+#### 推给订阅了指定 topic 的连接
+
+直接发布到对应 topic 通道：
+
+```bash
+PUBLISH ws:push:topic:ws.available-balances '{"type":"topic","topic":"ws.available-balances","data":{}}'
 ```
 
-**推给订阅了指定 topic 的连接：**
+消息格式：
+
 ```json
 {
   "type": "topic",
@@ -334,11 +260,11 @@ Java 向 Redis `ws:push` channel 发布 JSON 消息：
 }
 ```
 
-### WebSocket 协议
+## WebSocket 协议
 
-#### 1. 连接初始化（必须）
+### 1. 连接初始化（必须）
 
-客户端连接后立即发送 `connection_init` 消息进行身份验证：
+客户端连接后必须立即发送：
 
 ```json
 {
@@ -350,7 +276,7 @@ Java 向 Redis `ws:push` channel 发布 JSON 消息：
 }
 ```
 
-或（游客用户）：
+或：
 
 ```json
 {
@@ -362,17 +288,15 @@ Java 向 Redis `ws:push` channel 发布 JSON 消息：
 }
 ```
 
-服务端验证成功后返回：
+服务端成功响应：
 
 ```json
 { "type": "connection_ack" }
 ```
 
-只有收到 `connection_ack` 后，才能发送其他消息。
+### 2. 订阅（必须显式订阅）
 
-#### 2. 订阅（可选）
-
-客户端发起订阅请求：
+客户端只会收到自己订阅过的 topic 消息。
 
 ```json
 {
@@ -382,7 +306,7 @@ Java 向 Redis `ws:push` channel 发布 JSON 消息：
 }
 ```
 
-服务端接收订阅（不返回确认），当有数据时会推送：
+服务端后续推送：
 
 ```json
 {
@@ -397,9 +321,7 @@ Java 向 Redis `ws:push` channel 发布 JSON 消息：
 }
 ```
 
-#### 3. 取消订阅
-
-客户端发送 `complete` 消息停止订阅：
+### 3. 取消订阅
 
 ```json
 {
@@ -408,57 +330,44 @@ Java 向 Redis `ws:push` channel 发布 JSON 消息：
 }
 ```
 
-#### 4. 心跳
+### 4. 心跳
 
-客户端定期发送 ping，服务端响应 pong：
-
-**客户端：**
 ```json
 { "type": "ping" }
-```
-
-**服务端：**
-```json
 { "type": "pong" }
 ```
 
-生产环境建议客户端每 30-60 秒发送一次 `ping`，避免 Cloudflare 或 ALB 因连接长期空闲而主动断开。
-
-#### 5. 健康检查接口
-
-```
-GET /health
-```
-
-```json
-{
-  "status": "ok",
-  "nodeId": "node-1",
-  "redis": "ok",
-  "draining": false,
-  "connections": 42,
-  "subscriptions": 128
-}
-```
-
-当实例进入优雅停机阶段或 Redis 不可用时，`/health` 会返回 `503`。
-
-#### 6. 就绪检查接口
-
-```
-GET /ready
-```
-
-用于负载均衡摘流量或容器启动探针。服务处于摘流量阶段，或 Redis `PING` 失败时，该接口返回 `503`。
-
 ## 消息模型说明
 
-Java 侧只需要做一件事：向 Redis `ws:push` channel 发布 JSON 消息，Gateway 会负责后续分发。
+- `type=user`：只推给指定 `userId` 的在线连接
+- `type=topic`：只推给订阅了该 topic 的连接
 
-- `type=user`：网关会查找用户当前所在节点，并只把消息推给该用户的在线连接
-- `type=broadcast`：每个网关节点都会把消息广播给自己持有的在线连接
-- `type=topic`：每个网关节点都会把消息推给本节点上订阅了该 topic 的连接
+没有默认 `broadcast`。如果某类公共消息希望所有在线用户都收到，应由客户端在连接成功后统一订阅对应基础 topic，例如：
 
-节点之间的定向转发走 `ws:route:{nodeId}` channel，这部分对业务方透明，不需要额外处理。
+- `ws.announcements`
+- `ws.feature-flag`
 
-需要注意的是，当前方案是“在线尽力投递”模型：只保证消息发给当前在线的连接，不提供消息持久化、消费确认、失败重放或离线补发能力。
+也就是说，“所有人都收到”不再由服务端默认广播保证，而是由客户端主动订阅一组公共 topic 来实现。
+
+## Docker 部署
+
+### 单节点
+
+```bash
+docker compose up -d
+```
+
+### 多节点（横向扩展）
+
+```bash
+docker compose up -d --scale ws-gateway=3
+```
+
+> 注意：每个节点的 `NODE_ID` 必须唯一，否则 Redis 路由会出错。
+
+## 验证
+
+```bash
+npm run build
+npm test
+```

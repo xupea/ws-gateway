@@ -1,9 +1,16 @@
 import Redis from 'ioredis';
 import config from '../config';
-import type { PushMessage } from '../types';
+import type { PushMessage, TopicPushMessage } from '../types';
 
 type RouteHandler = (message: PushMessage) => void;
-type IngressHandler = (message: PushMessage) => Promise<void>;
+type IngressHandler = (message: PushMessage) => void;
+
+const refreshOwnedUserNodeScript = `
+  if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+  end
+  return 0
+`;
 
 const client = new Redis({
   host: config.redis.host,
@@ -38,6 +45,15 @@ function isOpen(redis: Redis): boolean {
   return redis.status === 'ready' || redis.status === 'connect' || redis.status === 'connecting';
 }
 
+function parseMessage(data: string): PushMessage | null {
+  try {
+    return JSON.parse(data) as PushMessage;
+  } catch (err) {
+    console.error('[Redis] message parse error:', (err as Error).message);
+    return null;
+  }
+}
+
 export async function connect(): Promise<void> {
   await client.connect();
   await routeSubscriber.connect();
@@ -49,12 +65,25 @@ export async function setUserNode(userId: string): Promise<void> {
   await client.set(
     `${config.redis.userNodePrefix}${userId}`,
     config.server.nodeId,
-    'EX', 86400,
+    'EX', config.redis.userNodeTtlSec,
   );
 }
 
 export async function removeUserNode(userId: string): Promise<void> {
   await client.del(`${config.redis.userNodePrefix}${userId}`);
+}
+
+/**
+ * 仅当 Redis 中存储的 nodeId 仍为本节点时才删除。
+ *
+ * 用于 close handler：若用户已在其他节点重新登录，Redis 已被新节点更新，
+ * 此时不应删除，否则会使新连接的路由失效。
+ */
+export async function removeUserNodeIfOwner(userId: string): Promise<void> {
+  const current = await client.get(`${config.redis.userNodePrefix}${userId}`);
+  if (current === config.server.nodeId) {
+    await client.del(`${config.redis.userNodePrefix}${userId}`);
+  }
 }
 
 export async function getUserNode(userId: string): Promise<string | null> {
@@ -68,32 +97,78 @@ export async function routeToNode(nodeId: string, message: PushMessage): Promise
   );
 }
 
+export async function refreshOwnedUserNodes(userIds: string[]): Promise<void> {
+  if (userIds.length === 0) return;
+
+  const pipeline = client.pipeline();
+  for (const userId of userIds) {
+    pipeline.eval(
+      refreshOwnedUserNodeScript,
+      1,
+      `${config.redis.userNodePrefix}${userId}`,
+      config.server.nodeId,
+      String(config.redis.userNodeTtlSec),
+    );
+  }
+  await pipeline.exec();
+}
+
+export async function cleanStaleUserNodes(ownerNodeId: string = config.server.nodeId): Promise<number> {
+  let cursor = '0';
+  let deleted = 0;
+  const pattern = `${config.redis.userNodePrefix}*`;
+
+  do {
+    const [nextCursor, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
+    cursor = nextCursor;
+
+    if (keys.length === 0) continue;
+
+    const pipeline = client.pipeline();
+    for (const key of keys) pipeline.get(key);
+    const results = await pipeline.exec();
+    if (!results) continue;
+
+    const keysToDelete: string[] = [];
+    for (let i = 0; i < keys.length; i += 1) {
+      const [, value] = results[i] ?? [];
+      if (value === ownerNodeId) keysToDelete.push(keys[i]);
+    }
+
+    if (keysToDelete.length > 0) {
+      deleted += keysToDelete.length;
+      await client.del(...keysToDelete);
+    }
+  } while (cursor !== '0');
+
+  return deleted;
+}
+
 export async function subscribeToRoutes(handler: RouteHandler): Promise<void> {
   const channel = `${config.redis.routeChannelPrefix}${config.server.nodeId}`;
   await routeSubscriber.subscribe(channel);
   routeSubscriber.on('message', (ch: string, data: string) => {
     if (ch !== channel) return;
-    try {
-      handler(JSON.parse(data) as PushMessage);
-    } catch (err) {
-      console.error('[Redis] route message parse error:', (err as Error).message);
-    }
+    const parsed = parseMessage(data);
+    if (parsed) handler(parsed);
   });
   console.log(`[Redis] subscribed to route channel: ${channel}`);
 }
 
-export async function subscribeToIngress(handler: IngressHandler): Promise<void> {
-  const channel = config.redis.ingressChannel;
-  await ingressSubscriber.subscribe(channel);
-  ingressSubscriber.on('message', async (ch: string, data: string) => {
-    if (ch !== channel) return;
-    try {
-      await handler(JSON.parse(data) as PushMessage);
-    } catch (err) {
-      console.error('[Redis] ingress message handler error:', (err as Error).message);
+export async function subscribeToTopics(handler: IngressHandler): Promise<void> {
+  const pattern = `${config.redis.topicChannelPrefix}*`;
+  await ingressSubscriber.psubscribe(pattern);
+  ingressSubscriber.on('pmessage', (_pattern: string, channel: string, data: string) => {
+    if (!channel.startsWith(config.redis.topicChannelPrefix)) return;
+    const parsed = parseMessage(data);
+    if (!parsed) return;
+
+    if (parsed.type === 'topic' && !parsed.topic) {
+      (parsed as TopicPushMessage).topic = channel.slice(config.redis.topicChannelPrefix.length);
     }
+    handler(parsed);
   });
-  console.log(`[Redis] subscribed to ingress channel: ${channel}`);
+  console.log(`[Redis] subscribed to topic pattern: ${pattern}`);
 }
 
 export async function close(): Promise<void> {

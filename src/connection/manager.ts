@@ -39,26 +39,38 @@ export function sendToUser(userId: string, message: PushMessage): boolean {
   return true;
 }
 
-export function broadcast(message: PushMessage): void {
-  const data = JSON.stringify(message);
-  for (const sockets of connections.values()) {
-    for (const ws of sockets) {
-      try {
-        ws.send(data);
-      } catch {
-        // ignore individual send errors
-      }
-    }
-  }
-}
-
 export function hasUser(userId: string): boolean {
   const sockets = connections.get(userId);
   return !!sockets && sockets.size > 0;
+}
+
+/**
+ * 关闭指定用户在本节点的所有连接（互踢使用）
+ * close 事件会异步触发，由 close handler 完成后续 connectionManager / Redis 清理
+ */
+export function closeUser(userId: string, code: number, reason: string): void {
+  const sockets = connections.get(userId);
+  if (!sockets) return;
+  // 复制一份再遍历，避免 ws.end() 触发 close 时修改正在迭代的 Set
+  for (const ws of [...sockets]) {
+    try {
+      ws.end(code, reason);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 export function size(): number {
   let count = 0;
   for (const sockets of connections.values()) count += sockets.size;
   return count;
+}
+
+export function userIds(): string[] {
+  return [...connections.keys()];
+}
+
+export function __resetForTests(): void {
+  connections.clear();
 }

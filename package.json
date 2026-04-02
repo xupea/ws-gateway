@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "test": "npm run build && node --test test/**/*.test.js"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +17,7 @@
     "axios": "^1.13.6",
     "dotenv": "^17.3.1",
     "ioredis": "^5.10.1",
+    "tailwindcss": "^4.2.2",
     "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.59.0"
   },
   "devDependencies": {

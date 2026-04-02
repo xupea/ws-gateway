@@ -15,6 +15,27 @@ const tokenClient = axios_1.default.create({
     baseURL: config_1.default.auth.tokenValidateUrl,
     timeout: config_1.default.auth.timeoutMs,
 });
+const authCache = new Map();
+function getCached(token) {
+    const entry = authCache.get(token);
+    if (!entry)
+        return null;
+    if (Date.now() > entry.expiresAt) {
+        authCache.delete(token);
+        return null;
+    }
+    return entry.user;
+}
+function setCached(token, user) {
+    // 超出上限时，淘汰最旧的一条（Map 按插入顺序迭代）
+    if (authCache.size >= config_1.default.auth.cacheMaxSize) {
+        const oldestKey = authCache.keys().next().value;
+        if (oldestKey !== undefined)
+            authCache.delete(oldestKey);
+    }
+    authCache.set(token, { user, expiresAt: Date.now() + config_1.default.auth.cacheTtlMs });
+}
+// ─────────────────────────────────────────────────────────────────────────────
 function extractSession(cookieHeader) {
     const name = config_1.default.auth.sessionCookieName;
     const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
@@ -73,6 +94,7 @@ async function authenticate(cookieHeader) {
 /**
  * 验证 accessToken 或 lockdownToken（统一到同一个 Java 端点）
  * 优先级：accessToken > lockdownToken
+ * 验证结果缓存 cacheTtlMs（默认 30s），减少 Java 认证服务压力。
  */
 async function authenticateByToken(accessToken, lockdownToken) {
     if (config_1.default.auth.devBypass) {
@@ -82,15 +104,25 @@ async function authenticateByToken(accessToken, lockdownToken) {
     }
     // 优先使用 accessToken（已登录用户）
     if (accessToken) {
+        const cached = getCached(accessToken);
+        if (cached)
+            return cached;
         const user = await validateToken({ accessToken });
-        if (user)
+        if (user) {
+            setCached(accessToken, user);
             return user;
+        }
     }
     // 其次使用 lockdownToken（未登录用户/游客）
     if (lockdownToken) {
+        const cached = getCached(lockdownToken);
+        if (cached)
+            return cached;
         const user = await validateToken({ lockdownToken });
-        if (user)
+        if (user) {
+            setCached(lockdownToken, user);
             return user;
+        }
     }
     return null;
 }

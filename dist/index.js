@@ -40,15 +40,27 @@ const uWebSockets_js_1 = __importDefault(require("uWebSockets.js"));
 const config_1 = __importDefault(require("./config"));
 const redis = __importStar(require("./redis"));
 const server_1 = require("./ws/server");
+const connectionManager = __importStar(require("./connection/manager"));
 const dispatcher_1 = require("./dispatcher");
 async function main() {
     await redis.connect();
-    await redis.subscribeToIngress(dispatcher_1.dispatch);
+    const deleted = await redis.cleanStaleUserNodes();
+    if (deleted > 0) {
+        console.log(`[Redis] cleaned ${deleted} stale user_node mappings for ${config_1.default.server.nodeId}`);
+    }
+    await redis.subscribeToTopics(dispatcher_1.dispatchTopicIngress);
     await redis.subscribeToRoutes(dispatcher_1.handleRouted);
     const state = { isDraining: false };
     const app = (0, server_1.createServer)(state);
     let listenSocket = null;
     let shuttingDown = false;
+    const refreshTimer = setInterval(() => {
+        const userIds = connectionManager.userIds();
+        void redis.refreshOwnedUserNodes(userIds).catch((err) => {
+            console.error('[Redis] refresh user_node TTL error:', err.message);
+        });
+    }, config_1.default.redis.userNodeRefreshIntervalMs);
+    refreshTimer.unref();
     app.listen(config_1.default.server.port, (token) => {
         if (token) {
             listenSocket = token;
@@ -69,6 +81,7 @@ async function main() {
             uWebSockets_js_1.default.us_listen_socket_close(listenSocket);
             listenSocket = null;
         }
+        clearInterval(refreshTimer);
         await new Promise((resolve) => setTimeout(resolve, config_1.default.server.shutdownGraceMs));
         await redis.close();
         process.exit(0);

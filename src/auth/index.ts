@@ -12,6 +12,37 @@ const tokenClient = axios.create({
   timeout: config.auth.timeoutMs,
 });
 
+// ── 认证结果缓存 ──────────────────────────────────────────────────────────────
+// 避免高并发重连时（如节点滚动更新）大量请求同时冲击 Java 认证服务。
+// 只缓存成功结果；401 不缓存，确保无效 token 能被及时拒绝。
+// 注意：缓存期间（默认 30s）内 Token 被吊销的连接仍可建立，
+//       但已建立连接可通过业务侧推送 force_logout 事件来处理。
+interface CacheEntry {
+  user: AuthUser;
+  expiresAt: number;
+}
+const authCache = new Map<string, CacheEntry>();
+
+function getCached(token: string): AuthUser | null {
+  const entry = authCache.get(token);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    authCache.delete(token);
+    return null;
+  }
+  return entry.user;
+}
+
+function setCached(token: string, user: AuthUser): void {
+  // 超出上限时，淘汰最旧的一条（Map 按插入顺序迭代）
+  if (authCache.size >= config.auth.cacheMaxSize) {
+    const oldestKey = authCache.keys().next().value;
+    if (oldestKey !== undefined) authCache.delete(oldestKey);
+  }
+  authCache.set(token, { user, expiresAt: Date.now() + config.auth.cacheTtlMs });
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 function extractSession(cookieHeader: string): string | null {
   const name = config.auth.sessionCookieName;
   const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
@@ -71,6 +102,7 @@ export async function authenticate(cookieHeader: string): Promise<AuthUser | nul
 /**
  * 验证 accessToken 或 lockdownToken（统一到同一个 Java 端点）
  * 优先级：accessToken > lockdownToken
+ * 验证结果缓存 cacheTtlMs（默认 30s），减少 Java 认证服务压力。
  */
 export async function authenticateByToken(
   accessToken?: string,
@@ -84,14 +116,26 @@ export async function authenticateByToken(
 
   // 优先使用 accessToken（已登录用户）
   if (accessToken) {
+    const cached = getCached(accessToken);
+    if (cached) return cached;
+
     const user = await validateToken({ accessToken });
-    if (user) return user;
+    if (user) {
+      setCached(accessToken, user);
+      return user;
+    }
   }
 
   // 其次使用 lockdownToken（未登录用户/游客）
   if (lockdownToken) {
+    const cached = getCached(lockdownToken);
+    if (cached) return cached;
+
     const user = await validateToken({ lockdownToken });
-    if (user) return user;
+    if (user) {
+      setCached(lockdownToken, user);
+      return user;
+    }
   }
 
   return null;

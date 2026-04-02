@@ -3,9 +3,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.add = add;
 exports.remove = remove;
 exports.sendToUser = sendToUser;
-exports.broadcast = broadcast;
 exports.hasUser = hasUser;
+exports.closeUser = closeUser;
 exports.size = size;
+exports.userIds = userIds;
+exports.__resetForTests = __resetForTests;
 // userId → Set<WebSocket>（同一用户可能多个 tab 同时连接）
 const connections = new Map();
 function add(userId, ws) {
@@ -41,26 +43,37 @@ function sendToUser(userId, message) {
     }
     return true;
 }
-function broadcast(message) {
-    const data = JSON.stringify(message);
-    for (const sockets of connections.values()) {
-        for (const ws of sockets) {
-            try {
-                ws.send(data);
-            }
-            catch {
-                // ignore individual send errors
-            }
-        }
-    }
-}
 function hasUser(userId) {
     const sockets = connections.get(userId);
     return !!sockets && sockets.size > 0;
+}
+/**
+ * 关闭指定用户在本节点的所有连接（互踢使用）
+ * close 事件会异步触发，由 close handler 完成后续 connectionManager / Redis 清理
+ */
+function closeUser(userId, code, reason) {
+    const sockets = connections.get(userId);
+    if (!sockets)
+        return;
+    // 复制一份再遍历，避免 ws.end() 触发 close 时修改正在迭代的 Set
+    for (const ws of [...sockets]) {
+        try {
+            ws.end(code, reason);
+        }
+        catch {
+            // ignore
+        }
+    }
 }
 function size() {
     let count = 0;
     for (const sockets of connections.values())
         count += sockets.size;
     return count;
+}
+function userIds() {
+    return [...connections.keys()];
+}
+function __resetForTests() {
+    connections.clear();
 }

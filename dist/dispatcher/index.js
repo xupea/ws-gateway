@@ -34,14 +34,18 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.dispatch = dispatch;
+exports.dispatchTopicIngress = dispatchTopicIngress;
 exports.handleRouted = handleRouted;
-const redis = __importStar(require("../redis"));
 const connectionManager = __importStar(require("../connection/manager"));
 const subscriptionManager = __importStar(require("../subscription/manager"));
-async function dispatch(message) {
-    if (message.type === 'broadcast') {
-        return dispatchBroadcast(message);
-    }
+/**
+ * 兼容旧入口的分发逻辑。
+ *
+ * 仅保留给迁移期使用。当前正式协议只包含：
+ *   - user：Java 先查 user_node，再精准投递到 ws:route:{nodeId}
+ *   - topic：Java 发布到 ws:push:topic:{topic}，所有节点各自推送本地订阅者
+ */
+function dispatch(message) {
     if (message.type === 'user') {
         return dispatchToUser(message);
     }
@@ -50,34 +54,25 @@ async function dispatch(message) {
     }
     console.warn('[Dispatcher] unknown message type:', message.type);
 }
-async function dispatchToUser(message) {
+function dispatchTopicIngress(message) {
+    if (message.type !== 'topic') {
+        console.warn('[Dispatcher] non-topic message received on topic ingress');
+        return;
+    }
+    dispatchToTopic(message);
+}
+function dispatchToUser(message) {
     const { userId } = message;
-    // 用户在本节点，直接推
     if (connectionManager.hasUser(userId)) {
         connectionManager.sendToUser(userId, message);
         return;
     }
-    // 查 Redis 找用户在哪个节点
-    const targetNodeId = await redis.getUserNode(userId);
-    if (!targetNodeId) {
-        console.debug(`[Dispatcher] user ${userId} is offline, message dropped`);
-        return;
-    }
-    // 转发给目标节点
-    await redis.routeToNode(targetNodeId, message);
+    // 用户不在本节点：由持有该用户连接的节点负责推送，本节点跳过。
+    // 所有节点都会收到这条 ingress 消息，用户所在节点一定也会收到并处理。
+    console.debug(`[Dispatcher] user ${userId} not on this node, skipping`);
 }
-function dispatchBroadcast(message) {
-    // 广播：本节点推给所有连接
-    // 所有节点都能收到同一条入口广播消息，各自广播给自己的连接
-    connectionManager.broadcast(message);
-}
-/**
- * 推送给本节点上订阅了指定 topic 的所有连接
- * 每条 next 消息的 id 为该连接当初 subscribe 时客户端传入的 UUID
- */
 function dispatchToTopic(message) {
     const { topic, data } = message;
-    // 验证 topic 是否支持
     if (!subscriptionManager.isSupportedTopic(topic)) {
         console.warn(`[Dispatcher] unsupported topic: ${topic}, message dropped`);
         return;
@@ -85,11 +80,17 @@ function dispatchToTopic(message) {
     subscriptionManager.publish(topic, data);
 }
 /**
- * 处理从 Redis Pub/Sub 路由过来的消息（其他节点转发来的）
+ * 处理来自 ws:route:{nodeId} 通道的消息。
+ * 用于 Java 侧先查询 user_node 再精准发布到本节点的场景，
+ * 以及节点间互踢指令。
  */
 function handleRouted(message) {
-    if (message.type === 'broadcast') {
-        connectionManager.broadcast(message);
+    if (message.type === 'kick') {
+        // 收到其他节点发来的踢除指令，关闭本节点上该用户的所有连接
+        // close handler 会自动清理 connectionManager，并通过 removeUserNodeIfOwner
+        // 确保不会错误删除已被新节点更新的 Redis 映射
+        connectionManager.closeUser(message.userId, 4409, 'logged in elsewhere');
+        console.log(`[Dispatcher] kicked user ${message.userId} (routed from another node)`);
         return;
     }
     if (message.type === 'user') {
@@ -97,7 +98,6 @@ function handleRouted(message) {
         return;
     }
     if (message.type === 'topic') {
-        // 验证 topic 是否支持
         if (!subscriptionManager.isSupportedTopic(message.topic)) {
             console.warn(`[Dispatcher] routed unsupported topic: ${message.topic}, message dropped`);
             return;
